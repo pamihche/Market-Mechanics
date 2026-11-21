@@ -1,0 +1,204 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+library("AssetLibrary", overlay = true)
+
+
+//====================================================================
+// CONSTANTS
+//====================================================================
+
+export const int MAIN_ASSET_ID   = 0
+export const int SECOND_ASSET_ID = 1
+export const int THIRD_ASSET_ID  = 2
+
+
+//====================================================================
+// TYPES
+//====================================================================
+
+export type PairedAssets
+    string MainAssetSymbolRoot   = na
+    string SecondAssetSymbolRoot = na
+    string ThirdAssetSymbolRoot  = na
+
+    string MainAssetSymbol       = na
+    string SecondAssetSymbol     = na
+    string ThirdAssetSymbol      = na
+
+    string MainAssetExchange     = na
+    string SecondAssetExchange   = na
+    string ThirdAssetExchange    = na
+
+
+export type Assets
+    bool          IsMainAssetPaired            = false
+    int           MainAssetId         = 0
+    int           SecondAssetId       = -1
+    int           ThirdAssetId        = -2
+    string        SecondTicker        = na
+    string        ThirdTicker         = na
+    PairedAssets  PairedAssets        = na
+    array<string> CombinedAssets      = na
+    array<int>    CombinedAssetsIds   = na
+    array<int>    CorrelatedAssetsIds = na
+
+
+//====================================================================
+// PAIRED ASSETS AUTO-DETECTION
+//====================================================================
+
+getTickerExchangePrefix(string tickerRoot) =>
+    string prefix = switch tickerRoot
+        // INDICES (CME / CBOT)
+        "YM"  => "CBOT_MINI"
+        "MYM" => "CBOT_MINI"
+        "NQ"  => "CME_MINI"
+        "MNQ" => "CME_MINI"
+        "ES"  => "CME_MINI"
+        "MES" => "CME_MINI"
+        "RTY" => "CME_MINI"
+        "M2K" => "CME_MINI"
+
+        // METALS (COMEX)
+        "GC"  => "COMEX"
+        "MGC" => "COMEX"
+        "SI"  => "COMEX"
+        "SIL" => "COMEX"
+        "HG"  => "COMEX"
+        "MHG" => "COMEX"
+
+        // ENERGY (NYMEX)
+        "CL"  => "NYMEX"
+        "MCL" => "NYMEX"
+        "RB"  => "NYMEX"
+        "MRB" => "NYMEX"
+        "HO"  => "NYMEX"
+        "MHO" => "NYMEX"
+
+        // FOREX FUTURES (CME)
+        "6E"  => "CME"
+        "M6E" => "CME"
+        "6B"  => "CME"
+        "M6B" => "CME"
+
+        // DEFAULT
+        =>       "CME_MINI"
+
+    prefix
+
+
+export getAutoDetectedPairedAssets() =>
+    PairedAssets pairedAssets = PairedAssets.new()
+
+    for strTriadList in array.from(
+        "NQ,YM,ES",    "CL,RB,HO",    "GC,SI,HG",
+        "MNQ,MYM,MES", "MCL,MRB,MHO", "MGC,SIL,MHG",
+        "RTY,YM",      "M2K,MYM"
+    )
+        array<string> splitArrayId = str.split(strTriadList, ",")
+
+        int mainAssetIndex = splitArrayId.indexof(syminfo.root)
+        if ( mainAssetIndex < 0 )
+            continue
+
+        splitArrayId.remove(mainAssetIndex)
+        if ( splitArrayId.size() == 0 )
+            continue
+
+        string secondRoot    = str.trim(splitArrayId.get(0))
+        string thirdRootRaw  = ( splitArrayId.size() > 1 ) ? str.trim(splitArrayId.get(1)) : ""
+        bool   hasThirdAsset = ( str.length(thirdRootRaw) > 0 )
+        string assetSuffix   = str.replace(syminfo.ticker, syminfo.root, '')
+
+        pairedAssets.MainAssetSymbolRoot   := syminfo.root
+        pairedAssets.SecondAssetSymbolRoot := secondRoot
+        pairedAssets.MainAssetSymbol       := syminfo.ticker
+        pairedAssets.SecondAssetSymbol     := secondRoot + assetSuffix
+        pairedAssets.MainAssetExchange     := getTickerExchangePrefix(pairedAssets.MainAssetSymbolRoot)
+        pairedAssets.SecondAssetExchange   := getTickerExchangePrefix(secondRoot)
+
+        if ( hasThirdAsset )
+            pairedAssets.ThirdAssetSymbolRoot := thirdRootRaw
+            pairedAssets.ThirdAssetSymbol     := thirdRootRaw + assetSuffix
+            pairedAssets.ThirdAssetExchange   := getTickerExchangePrefix(thirdRootRaw)
+
+        break
+
+    ( na(pairedAssets.MainAssetSymbol) or na(pairedAssets.SecondAssetSymbol) ) ? na : pairedAssets
+
+
+//====================================================================
+// Assets METHODS
+//====================================================================
+
+export method isSecondAssetEnabled(Assets this) =>
+    (this.SecondAssetId > 0)
+
+
+export method isThirdAssetEnabled(Assets this) =>
+    (this.ThirdAssetId > 0)
+
+
+export method configure(Assets this, bool enableSecondAsset = true, bool enableThirdAsset = true, string customSecondTicker = na, string customThirdTicker = na) =>
+    PairedAssets paired = this.PairedAssets
+    bool hasAutoPaired  = not( na(paired) )
+
+    bool hasCustomSecond = not( na(customSecondTicker) )
+    bool hasCustomThird  = not( na(customThirdTicker) )
+
+    bool secondValid = (enableSecondAsset and (hasCustomSecond or (hasAutoPaired and not( na(paired.SecondAssetSymbol) ))))
+    bool thirdValid  = (enableThirdAsset  and (hasCustomThird  or (hasAutoPaired and not( na(paired.ThirdAssetSymbol) ))))
+
+    this.MainAssetId   := MAIN_ASSET_ID
+    this.SecondAssetId := secondValid ? SECOND_ASSET_ID : -SECOND_ASSET_ID
+    this.ThirdAssetId  := thirdValid  ? THIRD_ASSET_ID  : -THIRD_ASSET_ID
+
+    this.SecondTicker := na
+    if ( secondValid )
+        this.SecondTicker := hasCustomSecond ? customSecondTicker : ticker.new(paired.SecondAssetExchange, paired.SecondAssetSymbol, adjustment = adjustment.none, backadjustment = backadjustment.on, settlement_as_close = settlement_as_close.off)
+
+    this.ThirdTicker := na
+    if ( thirdValid )
+        this.ThirdTicker := hasCustomThird ? customThirdTicker : ticker.new(paired.ThirdAssetExchange, paired.ThirdAssetSymbol, adjustment = adjustment.none, backadjustment = backadjustment.on, settlement_as_close = settlement_as_close.off)
+
+    this.IsMainAssetPaired := ((this.SecondAssetId > 0) or (this.ThirdAssetId > 0))
+
+    this.CombinedAssets.clear()
+    this.CombinedAssetsIds.clear()
+    this.CorrelatedAssetsIds.clear()
+
+    if ( this.IsMainAssetPaired )
+        string mainLabel = hasAutoPaired ? paired.MainAssetSymbolRoot : syminfo.root
+        this.CombinedAssets.push(mainLabel)
+        this.CombinedAssetsIds.push(this.MainAssetId)
+
+        if ( this.SecondAssetId > 0 )
+            string secondLabel = hasCustomSecond ? customSecondTicker : paired.SecondAssetSymbolRoot
+            this.CombinedAssets.push(secondLabel)
+            this.CombinedAssetsIds.push(this.SecondAssetId)
+            this.CorrelatedAssetsIds.push(this.SecondAssetId)
+
+        if ( this.ThirdAssetId > 0 )
+            string thirdLabel = hasCustomThird ? customThirdTicker : paired.ThirdAssetSymbolRoot
+            this.CombinedAssets.push(thirdLabel)
+            this.CombinedAssetsIds.push(this.ThirdAssetId)
+            this.CorrelatedAssetsIds.push(this.ThirdAssetId)
+
+    this
+
+
+//====================================================================
+// Assets CONSTRUCTOR
+//====================================================================
+
+export getAssetsInstance(bool enableSecondAsset = true, bool enableThirdAsset = true, string customSecondTicker = na, string customThirdTicker = na) =>
+    Assets assets = Assets.new(
+        PairedAssets        = getAutoDetectedPairedAssets(),
+        CombinedAssets      = array.new<string>(),
+        CombinedAssetsIds   = array.new<int>(),
+        CorrelatedAssetsIds = array.new<int>()
+    )
+    assets.configure(enableSecondAsset, enableThirdAsset, customSecondTicker, customThirdTicker)
+    assets

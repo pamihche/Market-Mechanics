@@ -1,0 +1,658 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+library("SmtLibrary", overlay = true)
+
+
+//====================================================================
+// ENUMS
+//====================================================================
+
+export enum LineStyleType
+    Solid  = "Solid"
+    Dashed = "Dashed"
+    Dotted = "Dotted"
+
+
+export method toLineStyle(LineStyleType this) =>
+    switch this
+        LineStyleType.Solid  => line.style_solid
+        LineStyleType.Dashed => line.style_dashed
+        =>                      line.style_dotted
+
+
+export enum SmtDirection
+    Bullish = "Bullish"
+    Bearish = "Bearish"
+
+
+export getAllSmtDirections() =>
+    var array<SmtDirection> _all = array.from(SmtDirection.Bullish, SmtDirection.Bearish)
+    _all
+
+
+export method toIntDirection(SmtDirection this) =>
+    switch this
+        SmtDirection.Bullish => 0
+        SmtDirection.Bearish => 1
+        =>                      -1
+
+
+export directionFromInt(int intDirection) =>
+    SmtDirection result = switch intDirection
+        0 => SmtDirection.Bullish
+        1 => SmtDirection.Bearish
+        =>   na
+    result
+
+
+export method isBearish(SmtDirection this) =>
+    (this == SmtDirection.Bearish)
+
+
+export method isBullish(SmtDirection this) =>
+    (this == SmtDirection.Bullish)
+
+
+export enum SmtType
+    SwingPoint = 'Swing Point'
+    GapFill    = 'Gap Top or Bottom'
+    Session    = 'Session High or Low'
+    Sequential = 'SSMT'
+
+
+export getAllSmtTypes() =>
+    var array<SmtType> _all = array.from(SmtType.SwingPoint, SmtType.GapFill, SmtType.Session, SmtType.Sequential)
+    _all
+
+
+export method toIntType(SmtType this) =>
+    switch this
+        SmtType.SwingPoint => 0
+        SmtType.GapFill    => 1
+        SmtType.Session    => 2
+        SmtType.Sequential => 3
+        =>                    -1
+
+
+export typeFromInt(int intSmtType) =>
+    SmtType result = switch intSmtType
+        0 => SmtType.SwingPoint
+        1 => SmtType.GapFill
+        2 => SmtType.Session
+        3 => SmtType.Sequential
+        =>   na
+    result
+
+
+export method isSwingPoint(SmtType this) =>
+    (this == SmtType.SwingPoint)
+
+
+export method isGapFill(SmtType this) =>
+    (this == SmtType.GapFill)
+
+
+export method isSession(SmtType this) =>
+    (this == SmtType.Session)
+
+
+export method isSequential(SmtType this) =>
+    (this == SmtType.Sequential)
+
+
+//====================================================================
+// TYPES
+//====================================================================
+
+// Unified SMT candidate across SwingPoint, GapFill, and Sequential (SSMT).
+//   - For SwingPoint & Sequential: TriggerPrice == InvalidPrice (sweeping the anchor both triggers & marks that side crossed).
+//   - For GapFill: TriggerPrice = near edge of gap (entry into gap); InvalidPrice = far edge of gap (both breaking far edge invalidates).
+//   - Uses integer chart bar indices (`StartBarIndex` -> `EndBarIndex`) for fast `xloc.bar_index` rendering.
+export type SmtCandidate
+    varip int   IntDirection       = -1
+    varip int   IntType            = -1
+
+    varip int   TimeFrameInSeconds = 0
+    varip int   CorrAssetId        = 0
+
+    varip int   OpenTime           = 0
+    varip int   EndOpenTime        = 0
+
+    varip int   StartBarIndex      = 0
+    varip float MainStartPrice     = 0
+    varip float CorrStartPrice     = 0
+
+    varip float MainTriggerPrice   = 0
+    varip float MainInvalidPrice   = 0
+    varip float CorrTriggerPrice   = 0
+    varip float CorrInvalidPrice   = 0
+
+    varip int   EndBarIndex        = 0
+    varip float MainEndPrice       = 0
+    varip float CorrEndPrice       = 0
+    varip float OtherEndPrice      = 0
+
+    varip bool  MainTriggered      = false
+    varip bool  CorrTriggered      = false
+    varip bool  MainInvalidated    = false
+    varip bool  CorrInvalidated    = false
+    varip bool  IsConfirmed        = false
+    varip bool  EndPointLocked     = false
+
+
+// Merged / ranked display item produced on the last/confirmed bar (combines Second + Third asset if identical SMT).
+export type SmtDisplayItem
+    int    DisplayKey         = 0
+    int    IntDirection       = -1
+    int    IntType            = -1
+    int    TimeFrameInSeconds = 0
+    int    StartBarIndex      = 0
+    float  MainStartPrice     = 0
+    int    EndBarIndex        = 0
+    float  MainEndPrice       = 0
+    bool   HasSecondAsset     = false
+    bool   HasThirdAsset      = false
+    bool   IsConfirmed        = false
+    bool   StartIsPSP         = false
+    bool   EndIsPSP           = false
+    bool   DrawStartPspDot    = false
+    bool   DrawEndPspDot      = false
+    string LabelText          = na
+    float  Score              = 0
+
+
+export type SmtCandidatesHolder
+    varip map<int, SmtCandidate> MapSmtCandidates = na
+    varip SmtCandidate           LastRegistered   = na
+    varip array<SmtCandidate>    CachedValues     = na
+    varip bool                   IsCacheInSync    = false
+    varip int                    MaxSize          = 50
+
+
+export type SmtCandidatesStorage
+    varip map<int, SmtCandidatesHolder> MapSmtCandidatesHolders = na
+
+
+export type Settings
+    bool          ShowLine             = true
+    color         LineColor            = #1A1A1AFF
+    color         UnconfirmedColor     = #FF9800FF
+    LineStyleType LineStyle            = LineStyleType.Solid
+    LineStyleType UnconfirmedLineStyle = LineStyleType.Solid
+    int           LineWidth            = 2
+    bool          ShowLabel            = true
+    string        LabelText            = na
+    color         LabelColor           = #FFFFFF00
+    color         LabelTextColor       = #000000FF
+    bool          ShowPspLabel         = true
+    color         PspTextColor         = na
+
+
+export type Drawings
+    int      DisplayKey    = 0
+    Settings Settings      = na
+    line     Line          = na
+    label    Label         = na
+    label    StartPspLabel = na
+    label    EndPspLabel   = na
+    int      StartBarIndex = 0
+    float    StartPrice    = 0
+    int      EndBarIndex   = 0
+    float    EndPrice      = 0
+    int      LabelBarIndex = 0
+    float    LabelPrice    = 0
+    string   LabelStyle    = na
+    bool     IsConfirmed   = false
+    bool     HasPsp        = false
+    string   LabelText     = na
+    color    LineColor     = na
+
+
+export type DrawingsHolder
+    map<int, Drawings> MapDrawings   = na
+    int                MaxSize       = 5
+    bool               IsCacheInSync = false
+    array<Drawings>    CachedValues  = na
+
+
+export type DrawingsStorage
+    map<int, DrawingsHolder> MapHolders = na
+
+
+//====================================================================
+// SmtCandidate METHODS
+//====================================================================
+
+export method isBullish(SmtCandidate this) =>
+    (this.IntDirection == 0)
+
+
+export method isBearish(SmtCandidate this) =>
+    (this.IntDirection == 1)
+
+
+export method isSwingPoint(SmtCandidate this) =>
+    (this.IntType == 0)
+
+
+export method isGapFill(SmtCandidate this) =>
+    (this.IntType == 1)
+
+
+export method isSession(SmtCandidate this) =>
+    (this.IntType == 2)
+
+
+export method isSequential(SmtCandidate this) =>
+    (this.IntType == 3)
+
+
+// Invalid when BOTH assets broke their invalidation level (far edge of gap for GapFill; swing/candle extreme for Swing/SSMT).
+export method isInvalid(SmtCandidate this) =>
+    (this.MainInvalidated and this.CorrInvalidated)
+
+
+export method isValid(SmtCandidate this) =>
+    not( this.isInvalid() )
+
+
+// Active divergence: valid, exactly one side triggered, and spans >= 1 bar.
+export method isActive(SmtCandidate this) =>
+    bool hasDivergence = (this.MainTriggered != this.CorrTriggered)
+    (this.isValid() and hasDivergence and (this.EndBarIndex > this.StartBarIndex))
+
+
+export method getTypeTag(SmtCandidate this) =>
+    string tag = switch this.IntType
+        0 => "SMT"
+        1 => "G-SMT"
+        2 => "S-SMT"
+        3 => "SSMT"
+        =>   "SMT"
+    tag
+
+
+//====================================================================
+// SmtCandidatesHolder METHODS
+//====================================================================
+
+export method clear(SmtCandidatesHolder this) =>
+    if ( this.MapSmtCandidates.size() > 0 )
+        this.MapSmtCandidates.clear()
+        this.CachedValues.clear()
+
+    if ( this.MaxSize < 0 )
+        this.MaxSize := 0
+
+    this.LastRegistered := na
+    this.IsCacheInSync  := true
+
+
+export method enforceMaxSize(SmtCandidatesHolder this) =>
+    if ( this.MaxSize > 0 )
+        int overflow = this.MapSmtCandidates.size() - this.MaxSize
+        if ( overflow > 0 )
+            if ( overflow == 1 )
+                for [mapKey, _] in this.MapSmtCandidates
+                    this.MapSmtCandidates.remove(mapKey)
+                    break
+            else
+                for [index, mapKey] in this.MapSmtCandidates.keys()
+                    this.MapSmtCandidates.remove(mapKey)
+                    if ( index == (overflow - 1) )
+                        break
+            this.IsCacheInSync := false
+    else
+        this.clear()
+
+
+export method setMaxSize(SmtCandidatesHolder this, int maxSize) =>
+    this.MaxSize := (maxSize > 0) ? maxSize : 0
+    this.enforceMaxSize()
+
+
+export method registerSmtCandidate(SmtCandidatesHolder this, SmtCandidate newSmtCandidate) =>
+    SmtCandidate existing = na
+    if ( (this.MaxSize > 0) and not( na(newSmtCandidate) ) )
+        this.LastRegistered := newSmtCandidate
+        existing            := this.MapSmtCandidates.put(newSmtCandidate.OpenTime, newSmtCandidate)
+        this.IsCacheInSync  := false
+        this.enforceMaxSize()
+    existing
+
+
+export method getSmtCandidate(SmtCandidatesHolder this, int smtCandidateKey) =>
+    this.MapSmtCandidates.get(smtCandidateKey)
+
+
+export method hasRegisteredSmtCandidate(SmtCandidatesHolder this, int smtCandidateKey) =>
+    this.MapSmtCandidates.contains(smtCandidateKey)
+
+
+export method getRegisteredSmtCandidates(SmtCandidatesHolder this) =>
+    if ( not( this.IsCacheInSync ) )
+        this.CachedValues  := this.MapSmtCandidates.values()
+        this.IsCacheInSync := true
+    this.CachedValues
+
+
+export method removeSmtCandidate(SmtCandidatesHolder this, int smtCandidateKey) =>
+    SmtCandidate removed = this.MapSmtCandidates.remove(smtCandidateKey)
+    if ( not( na(removed) ) )
+        this.IsCacheInSync := false
+        if ( this.MapSmtCandidates.size() == 0 )
+            this.LastRegistered := na
+        else if ( removed.OpenTime == this.LastRegistered.OpenTime )
+            this.LastRegistered := this.getRegisteredSmtCandidates().last()
+    removed
+
+
+export method countSmtCandidates(SmtCandidatesHolder this) =>
+    this.MapSmtCandidates.size()
+
+
+export method getLastRegisteredSmtCandidate(SmtCandidatesHolder this) =>
+    this.LastRegistered
+
+
+export method getLastRegisteredOpenTime(SmtCandidatesHolder this) =>
+    na(this.LastRegistered) ? 0 : this.LastRegistered.OpenTime
+
+
+//====================================================================
+// SmtCandidatesStorage METHODS
+//====================================================================
+
+export getStorageInstance() =>
+    SmtCandidatesStorage.new(MapSmtCandidatesHolders = map.new<int, SmtCandidatesHolder>())
+
+
+export method getSmtCandidatesHolder(SmtCandidatesStorage this, int holderKey, bool createIfNotExists = true, int maxSizeIfCreate = 50) =>
+    SmtCandidatesHolder smtCandidateHolder = this.MapSmtCandidatesHolders.get(holderKey)
+    if ( na(smtCandidateHolder) and createIfNotExists )
+        smtCandidateHolder := SmtCandidatesHolder.new(
+            MapSmtCandidates = map.new<int, SmtCandidate>(),
+            LastRegistered   = na,
+            CachedValues     = array.new<SmtCandidate>(),
+            IsCacheInSync    = true
+        )
+        smtCandidateHolder.setMaxSize(maxSizeIfCreate)
+        this.MapSmtCandidatesHolders.put(holderKey, smtCandidateHolder)
+    smtCandidateHolder
+
+
+//====================================================================
+// Drawings & DrawingsHolder METHODS
+//====================================================================
+
+export method deleteDrawings(Drawings this) =>
+    line.delete(this.Line)
+    label.delete(this.Label)
+    label.delete(this.StartPspLabel)
+    label.delete(this.EndPspLabel)
+    this.Line          := na
+    this.Label         := na
+    this.StartPspLabel := na
+    this.EndPspLabel   := na
+
+
+export method clear(DrawingsHolder this) =>
+    if ( this.MapDrawings.size() > 0 )
+        for [_, drawing] in this.MapDrawings
+            if ( not( na(drawing) ) )
+                drawing.deleteDrawings()
+        this.MapDrawings.clear()
+        this.CachedValues.clear()
+
+    if ( this.MaxSize < 0 )
+        this.MaxSize := 0
+
+    this.IsCacheInSync := true
+
+
+export method enforceMaxSize(DrawingsHolder this) =>
+    if ( this.MaxSize > 0 )
+        int overflow = this.MapDrawings.size() - this.MaxSize
+        if ( overflow > 0 )
+            if ( overflow == 1 )
+                for [mapKey, _] in this.MapDrawings
+                    Drawings evicted = this.MapDrawings.remove(mapKey)
+                    if ( not( na(evicted) ) )
+                        evicted.deleteDrawings()
+                    break
+            else
+                for [index, mapKey] in this.MapDrawings.keys()
+                    Drawings evicted = this.MapDrawings.remove(mapKey)
+                    if ( not( na(evicted) ) )
+                        evicted.deleteDrawings()
+                    if ( index == (overflow - 1) )
+                        break
+            this.IsCacheInSync := false
+    else
+        this.clear()
+
+
+export method setMaxSize(DrawingsHolder this, int maxSize) =>
+    this.MaxSize := (maxSize > 0) ? maxSize : 0
+    this.enforceMaxSize()
+
+
+export method removeDrawings(DrawingsHolder this, int drawingKey) =>
+    Drawings oldDrawing = this.MapDrawings.remove(drawingKey)
+    if ( not( na(oldDrawing) ) )
+        oldDrawing.deleteDrawings()
+        this.IsCacheInSync := false
+    oldDrawing
+
+
+export method registerDrawings(DrawingsHolder this, int drawingKey, Drawings drawing) =>
+    Drawings oldDrawing = na
+    if ( (this.MaxSize > 0) and not( na(drawing) ) )
+        drawing.DisplayKey := drawingKey
+        oldDrawing         := this.MapDrawings.put(drawingKey, drawing)
+        if ( not( na(oldDrawing) ) )
+            oldDrawing.deleteDrawings()
+        this.IsCacheInSync := false
+        this.enforceMaxSize()
+    else if ( not( na(drawing) ) )
+        drawing.deleteDrawings()
+    oldDrawing
+
+
+export method getAllRegisteredDrawings(DrawingsHolder this) =>
+    if ( not( this.IsCacheInSync ) )
+        this.CachedValues  := this.MapDrawings.values()
+        this.IsCacheInSync := true
+    this.CachedValues
+
+
+export method countDrawings(DrawingsHolder this) =>
+    this.MapDrawings.size()
+
+
+resolveSmtLabelPlacement(SmtDisplayItem item, bool isBear, bool showStartPsp, bool showEndPsp) =>
+    int   span      = math.max(1, item.EndBarIndex - item.StartBarIndex)
+    float priceDiff = ( item.MainEndPrice - item.MainStartPrice )
+    float flatTol   = ( math.abs(item.MainStartPrice) * 0.00005 * float(span) )
+    bool  isRising  = ( priceDiff > flatTol )
+    bool  isFalling = ( priceDiff < -flatTol )
+
+    string lblStyle = isBear ? label.style_label_down : label.style_label_up
+    if ( isBear )
+        if ( isRising )
+            lblStyle := label.style_label_lower_right
+        else if ( isFalling )
+            lblStyle := label.style_label_lower_left
+    else
+        if ( isRising )
+            lblStyle := label.style_label_upper_left
+        else if ( isFalling )
+            lblStyle := label.style_label_upper_right
+
+    bool extendsLeft = ( ( lblStyle == label.style_label_lower_right ) or ( lblStyle == label.style_label_upper_right ) )
+    int  anchorBar   = extendsLeft ? int(( item.StartBarIndex + item.EndBarIndex + 1 ) / 2) : int(( item.StartBarIndex + item.EndBarIndex ) / 2)
+
+    if ( span == 1 )
+        if ( showStartPsp and not( showEndPsp ) )
+            anchorBar := item.EndBarIndex
+        else if ( showEndPsp and not( showStartPsp ) )
+            anchorBar := item.StartBarIndex
+
+    float anchorY = ( item.MainStartPrice + ( ( priceDiff * float(anchorBar - item.StartBarIndex) ) / float(span) ) )
+    [anchorBar, anchorY, lblStyle]
+
+
+// Diff-syncs a single side's DrawingsHolder against the selected top-N SmtDisplayItems.
+// Reuses existing `line` & `label` primitives in place when a key stays in the top-N; deletes evicted/invalidated ones.
+export method synchronizeDisplayItems(DrawingsHolder this, array<SmtDisplayItem> displayItems, SmtDirection direction, Settings settings) =>
+    map<int, SmtDisplayItem> targetMap = map.new<int, SmtDisplayItem>()
+    for item in displayItems
+        targetMap.put(item.DisplayKey, item)
+
+    for existingDrawing in this.getAllRegisteredDrawings()
+        if ( not( targetMap.contains(existingDrawing.DisplayKey) ) )
+            this.removeDrawings(existingDrawing.DisplayKey)
+
+    confirmedStyle        = settings.LineStyle.toLineStyle()
+    unconfirmedStyle      = settings.UnconfirmedLineStyle.toLineStyle()
+    color unconfLineCol   = na(settings.UnconfirmedColor) ? settings.LineColor      : settings.UnconfirmedColor
+    color unconfTextCol   = na(settings.UnconfirmedColor) ? settings.LabelTextColor : settings.UnconfirmedColor
+    bool  isBear          = direction.isBearish()
+    pspDotStyle           = isBear ? label.style_label_down : label.style_label_up
+    bool  hasCustomPspCol = not( na(settings.PspTextColor) )
+
+    for [key, item] in targetMap
+        Drawings d        = this.MapDrawings.get(key)
+        itemStyle         = item.IsConfirmed ? confirmedStyle          : unconfirmedStyle
+        color lineCol     = item.IsConfirmed ? settings.LineColor      : unconfLineCol
+        color txtCol      = item.IsConfirmed ? settings.LabelTextColor : unconfTextCol
+        color pspCol      = hasCustomPspCol  ? settings.PspTextColor   : ( item.IsConfirmed ? settings.LabelTextColor : unconfTextCol )
+        bool  showStart   = ( settings.ShowPspLabel and item.DrawStartPspDot )
+        bool  showEnd     = ( settings.ShowPspLabel and item.DrawEndPspDot )
+        bool  hasPsp      = ( settings.ShowPspLabel and ( item.StartIsPSP or item.EndIsPSP ) )
+        bool  showMainLbl = ( settings.ShowLabel and not( na(item.LabelText) ) )
+        mainTxtFmt        = hasPsp ? text.format_bold : text.format_none
+
+        [anchorBar, anchorY, itemLblStyle] = resolveSmtLabelPlacement(item, isBear, showStart, showEnd)
+
+        if ( na(d) )
+            d := Drawings.new(
+                DisplayKey    = key,
+                Settings      = settings,
+                StartBarIndex = item.StartBarIndex,
+                StartPrice    = item.MainStartPrice,
+                EndBarIndex   = item.EndBarIndex,
+                EndPrice      = item.MainEndPrice,
+                LabelBarIndex = anchorBar,
+                LabelPrice    = anchorY,
+                LabelStyle    = itemLblStyle,
+                IsConfirmed   = item.IsConfirmed,
+                HasPsp        = hasPsp,
+                LabelText     = item.LabelText,
+                LineColor     = lineCol
+            )
+            if ( settings.ShowLine )
+                d.Line := line.new(item.StartBarIndex, item.MainStartPrice, item.EndBarIndex, item.MainEndPrice, xloc = xloc.bar_index, color = lineCol, style = itemStyle, width = settings.LineWidth)
+            if ( showMainLbl )
+                d.Label := label.new(anchorBar, anchorY, item.LabelText, xloc = xloc.bar_index, style = itemLblStyle, color = settings.LabelColor, textcolor = txtCol, size = size.tiny, text_formatting = mainTxtFmt)
+            if ( showStart )
+                d.StartPspLabel := label.new(item.StartBarIndex, item.MainStartPrice, "◉", xloc = xloc.bar_index, style = pspDotStyle, color = color(na), textcolor = pspCol, size = size.small, textalign = text.align_center, text_formatting = text.format_bold)
+            if ( showEnd )
+                d.EndPspLabel := label.new(item.EndBarIndex, item.MainEndPrice, "◉", xloc = xloc.bar_index, style = pspDotStyle, color = color(na), textcolor = pspCol, size = size.small, textalign = text.align_center, text_formatting = text.format_bold)
+            this.registerDrawings(key, d)
+            true
+        else
+            bool startMoved = ( ( d.StartBarIndex != item.StartBarIndex ) or ( d.StartPrice != item.MainStartPrice ) )
+            bool endMoved   = ( ( d.EndBarIndex != item.EndBarIndex )     or ( d.EndPrice != item.MainEndPrice ) )
+            if ( startMoved or endMoved )
+                d.StartBarIndex := item.StartBarIndex
+                d.StartPrice    := item.MainStartPrice
+                d.EndBarIndex   := item.EndBarIndex
+                d.EndPrice      := item.MainEndPrice
+                if ( not( na(d.Line) ) )
+                    d.Line.set_xy1(item.StartBarIndex, item.MainStartPrice)
+                    d.Line.set_xy2(item.EndBarIndex,   item.MainEndPrice)
+                if ( startMoved and not( na(d.StartPspLabel) ) )
+                    d.StartPspLabel.set_xy(item.StartBarIndex, item.MainStartPrice)
+                if ( endMoved and not( na(d.EndPspLabel) ) )
+                    d.EndPspLabel.set_xy(item.EndBarIndex, item.MainEndPrice)
+
+            if ( d.IsConfirmed != item.IsConfirmed )
+                d.IsConfirmed := item.IsConfirmed
+                d.LineColor   := lineCol
+                if ( not( na(d.Line) ) )
+                    d.Line.set_style(itemStyle)
+                    d.Line.set_color(lineCol)
+                if ( not( na(d.Label) ) )
+                    d.Label.set_textcolor(txtCol)
+                if ( not( na(d.StartPspLabel) ) )
+                    d.StartPspLabel.set_textcolor(pspCol)
+                if ( not( na(d.EndPspLabel) ) )
+                    d.EndPspLabel.set_textcolor(pspCol)
+
+            if ( d.HasPsp != hasPsp )
+                d.HasPsp := hasPsp
+                if ( not( na(d.Label) ) )
+                    d.Label.set_text_formatting(mainTxtFmt)
+
+            if ( showMainLbl )
+                if ( na(d.Label) )
+                    d.Label := label.new(anchorBar, anchorY, item.LabelText, xloc = xloc.bar_index, style = itemLblStyle, color = settings.LabelColor, textcolor = txtCol, size = size.tiny, text_formatting = mainTxtFmt)
+                    d.LabelBarIndex := anchorBar
+                    d.LabelPrice    := anchorY
+                    d.LabelStyle    := itemLblStyle
+                    d.LabelText     := item.LabelText
+                else
+                    if ( ( d.LabelBarIndex != anchorBar ) or ( d.LabelPrice != anchorY ) )
+                        d.LabelBarIndex := anchorBar
+                        d.LabelPrice    := anchorY
+                        d.Label.set_xy(anchorBar, anchorY)
+                    if ( d.LabelStyle != itemLblStyle )
+                        d.LabelStyle := itemLblStyle
+                        d.Label.set_style(itemLblStyle)
+                    if ( d.LabelText != item.LabelText )
+                        d.LabelText := item.LabelText
+                        d.Label.set_text(item.LabelText)
+            else if ( not( na(d.Label) ) )
+                label.delete(d.Label)
+                d.Label     := na
+                d.LabelText := na
+
+            if ( showStart )
+                if ( na(d.StartPspLabel) )
+                    d.StartPspLabel := label.new(item.StartBarIndex, item.MainStartPrice, "◉", xloc = xloc.bar_index, style = pspDotStyle, color = color(na), textcolor = pspCol, size = size.small, textalign = text.align_center, text_formatting = text.format_bold)
+            else if ( not( na(d.StartPspLabel) ) )
+                label.delete(d.StartPspLabel)
+                d.StartPspLabel := na
+
+            if ( showEnd )
+                if ( na(d.EndPspLabel) )
+                    d.EndPspLabel := label.new(item.EndBarIndex, item.MainEndPrice, "◉", xloc = xloc.bar_index, style = pspDotStyle, color = color(na), textcolor = pspCol, size = size.small, textalign = text.align_center, text_formatting = text.format_bold)
+            else if ( not( na(d.EndPspLabel) ) )
+                label.delete(d.EndPspLabel)
+                d.EndPspLabel := na
+
+            true
+
+
+//====================================================================
+// DrawingsStorage METHODS
+//====================================================================
+
+export getDrawingsStorageInstance() =>
+    DrawingsStorage.new(MapHolders = map.new<int, DrawingsHolder>())
+
+
+export method getDrawingsHolder(DrawingsStorage this, int holderKey, bool createIfNotExists = true, int maxSizeIfCreate = 5) =>
+    DrawingsHolder storageHolder = this.MapHolders.get(holderKey)
+    if ( na(storageHolder) and createIfNotExists )
+        storageHolder := DrawingsHolder.new(
+            MapDrawings   = map.new<int, Drawings>(),
+            CachedValues  = array.new<Drawings>(),
+            IsCacheInSync = true
+        )
+        storageHolder.setMaxSize(maxSizeIfCreate)
+        this.MapHolders.put(holderKey, storageHolder)
+    storageHolder

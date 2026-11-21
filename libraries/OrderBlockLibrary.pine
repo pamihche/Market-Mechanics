@@ -1,0 +1,630 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+library("OrderBlockLibrary", overlay = true)
+
+
+var int CURRENT_TIMEFRAME_IN_MILLISECONDS = ( timeframe.in_seconds(timeframe.period) * 1000 )
+
+
+//====================================================================
+// ENUMS
+//====================================================================
+
+export enum OrderBlockType
+    Bullish = 'Bullish'
+    Bearish = 'Bearish'
+
+
+export getAllOrderBlockTypes() =>
+    var array<OrderBlockType> _AllOrderBlockTypes = array.from(
+        OrderBlockType.Bullish,
+        OrderBlockType.Bearish
+    )
+    _AllOrderBlockTypes
+
+
+export method toIntType(OrderBlockType this) =>
+    switch this
+        OrderBlockType.Bullish => 0
+        OrderBlockType.Bearish => 1
+        =>                        -1
+
+
+export typeFromInt(int intObType) =>
+    OrderBlockType result = switch intObType
+        0 => OrderBlockType.Bullish
+        1 => OrderBlockType.Bearish
+        =>   na
+    result
+
+
+export method isBullish(OrderBlockType this) =>
+    ( this == OrderBlockType.Bullish )
+
+
+export method isBearish(OrderBlockType this) =>
+    ( this == OrderBlockType.Bearish )
+
+
+//====================================================================
+// DATA TYPES
+//====================================================================
+
+export type OrderBlock
+    varip int   IntType           = -1
+
+    varip int   BarIndex          = 0
+    varip int   OpenTime          = 0
+
+    varip float HighPrice         = 0
+    varip float LowPrice          = 0
+
+    varip bool  IsConfirmed       = false
+
+    varip bool  IsBreaker         = false
+    varip int   FlippedByBarIndex = 0
+    varip int   FlippedByOpenTime = 0
+
+    varip int   SwingBarIndex     = 0
+    varip int   SwingOpenTime     = 0
+    varip float SwingPrice        = 0
+    varip int   BreakOpenTime     = 0
+
+
+export type OrderBlocksHolder
+    varip map<int, OrderBlock> MapOrderBlocks           = na
+    varip OrderBlock           LastRegisteredOrderBlock = na
+    varip array<OrderBlock>    CachedValues             = na
+    varip bool                 IsCacheInSync            = false
+    varip int                  MaxSize                  = 5
+    varip int                  ConfirmedBySwingOpenTime = 0
+
+
+export type OrderBlocksStorage
+    varip map<int, OrderBlocksHolder> MapHolders = na
+
+
+//====================================================================
+// DRAWING TYPES
+//====================================================================
+
+export type Settings
+    color  BullishLineColor            = #089981FF
+    color  BullishFillColor            = #08998126
+    color  BullishBreakerLineColor     = #F23645FF
+    color  BullishBreakerFillColor     = #F2364526
+    color  BullishMitigatedLineColor   = #08998166
+    color  BullishMitigatedFillColor   = #0899811A
+    color  BullishUnconfirmedLineColor = #80808080
+    color  BullishUnconfirmedFillColor = #8080801A
+
+    color  BearishLineColor            = #F23645FF
+    color  BearishFillColor            = #F2364526
+    color  BearishBreakerLineColor     = #089981FF
+    color  BearishBreakerFillColor     = #08998126
+    color  BearishMitigatedLineColor   = #F2364566
+    color  BearishMitigatedFillColor   = #F236451A
+    color  BearishUnconfirmedLineColor = #80808080
+    color  BearishUnconfirmedFillColor = #8080801A
+
+    color  LabelColor                  = #787B86FF
+    bool   ShowLabel                   = true
+
+    int    LineWidth                   = 1
+    string LineStyle                   = line.style_solid
+    string BreakerLineStyle            = line.style_dashed
+    int    MidLineWidth                = 1
+    string MidLineStyle                = line.style_dashed
+    color  MidLineColor                = #80808080
+
+    bool   ShowSwingBreak              = true
+    color  SwingBreakColor             = #787B86CC
+    string SwingBreakStyle             = line.style_dotted
+    int    SwingBreakWidth             = 1
+
+    bool   EnableDistanceFilter        = false
+    float  DistanceAtrMultiplier       = 2.0
+    int    OutOfRangeOffsetBars        = 5
+
+
+export type Drawings
+    OrderBlock       OrderBlock        = na
+    Settings Settings          = na
+    line             TopLine           = na
+    line             BottomLine        = na
+    linefill         LineFill          = na
+    line             MidLine           = na
+    line             BreakerTopLine    = na
+    line             BreakerBottomLine = na
+    linefill         BreakerLineFill   = na
+    line             SwingBreakLine    = na
+    line             MssLine           = na
+    label            MssLabel          = na
+    label            Label             = na
+    color            LineColor         = na
+    color            FillColor         = na
+    color            BreakerLineColor  = na
+    color            BreakerFillColor  = na
+    color            LabelColor        = na
+    string           LabelText         = na
+
+
+export type DrawingsHolder
+    map<int, Drawings> MapDrawings = na
+    int                          MaxSize     = 5
+
+
+export type DrawingsStorage
+    map<int, DrawingsHolder> MapHolders = na
+
+
+//====================================================================
+// OrderBlock METHODS
+//====================================================================
+
+export method setType(OrderBlock this, OrderBlockType obType) =>
+    this.IntType := obType.toIntType()
+
+
+export method isBullish(OrderBlock this) =>
+    ( this.IntType == 0 )
+
+
+export method isBearish(OrderBlock this) =>
+    ( this.IntType == 1 )
+
+
+export method isEmptyInstance(OrderBlock this) =>
+    ( ( this.OpenTime + this.BarIndex ) == 0 )
+
+
+export method isPriceInRange(OrderBlock this, float price) =>
+    ( ( price >= this.LowPrice ) and ( price <= this.HighPrice ) )
+
+
+export method isWithinDistance(OrderBlock this, float currentPrice, float atr, float atrMultiplier) =>
+    bool result = true
+    if ( not( ( atrMultiplier <= 0 ) or ( nz(atr) == 0 ) or this.isPriceInRange(currentPrice) ) )
+        float distanceToTop    = math.abs(currentPrice - this.HighPrice)
+        float distanceToBottom = math.abs(currentPrice - this.LowPrice)
+        float closestDistance  = math.min(distanceToTop, distanceToBottom)
+        result := ( closestDistance <= ( atr * atrMultiplier ) )
+    result
+
+
+export method markBreaker(OrderBlock this, int atBarIndex, int atOpenTime) =>
+    this.IsBreaker         := true
+    this.FlippedByBarIndex := atBarIndex
+    this.FlippedByOpenTime := atOpenTime
+
+
+//====================================================================
+// OrderBlocksHolder METHODS
+//====================================================================
+
+export method clear(OrderBlocksHolder this) =>
+    if ( this.MapOrderBlocks.size() > 0 )
+        this.MapOrderBlocks.clear()
+        this.CachedValues.clear()
+
+    if ( this.MaxSize < 0 )
+        this.MaxSize := 0
+
+    this.LastRegisteredOrderBlock := na
+    this.IsCacheInSync            := true
+
+
+export method enforceMaxSize(OrderBlocksHolder this) =>
+    if ( this.MaxSize > 0 )
+        int overflow = ( this.MapOrderBlocks.size() - this.MaxSize )
+        if ( overflow > 0 )
+            if ( overflow == 1 )
+                for [mapKey, _] in this.MapOrderBlocks
+                    this.MapOrderBlocks.remove(mapKey)
+                    break
+            else
+                for [index, mapKey] in this.MapOrderBlocks.keys()
+                    this.MapOrderBlocks.remove(mapKey)
+                    if ( index == ( overflow - 1 ) )
+                        break
+            this.IsCacheInSync := false
+    else
+        this.clear()
+
+
+export method setMaxSize(OrderBlocksHolder this, int maxSize) =>
+    this.MaxSize := ( maxSize > 0 ) ? maxSize : 0
+    this.enforceMaxSize()
+
+
+export method registerOrderBlock(OrderBlocksHolder this, int obKey, OrderBlock ob) =>
+    OrderBlock existingOb = na
+    if ( ( this.MaxSize > 0 ) and not( na(ob) ) )
+        this.LastRegisteredOrderBlock := ob
+        existingOb                    := this.MapOrderBlocks.put(obKey, ob)
+        this.IsCacheInSync            := false
+        this.enforceMaxSize()
+    existingOb
+
+
+export method getOrderBlock(OrderBlocksHolder this, int obKey) =>
+    this.MapOrderBlocks.get(obKey)
+
+
+export method hasRegisteredOrderBlock(OrderBlocksHolder this, int obKey) =>
+    this.MapOrderBlocks.contains(obKey)
+
+
+export method getRegisteredOrderBlocks(OrderBlocksHolder this) =>
+    if ( not( this.IsCacheInSync ) )
+        this.CachedValues  := this.MapOrderBlocks.values()
+        this.IsCacheInSync := true
+    this.CachedValues
+
+
+export method removeOrderBlock(OrderBlocksHolder this, int obKey) =>
+    OrderBlock removedOb = this.MapOrderBlocks.remove(obKey)
+    if ( not( na(removedOb) ) )
+        this.IsCacheInSync := false
+        if ( this.MapOrderBlocks.size() == 0 )
+            this.LastRegisteredOrderBlock := na
+        else if ( removedOb.OpenTime == this.LastRegisteredOrderBlock.OpenTime )
+            this.LastRegisteredOrderBlock := this.getRegisteredOrderBlocks().last()
+    removedOb
+
+
+export method countOrderBlocks(OrderBlocksHolder this) =>
+    this.MapOrderBlocks.size()
+
+
+export method getLastRegisteredOrderBlock(OrderBlocksHolder this) =>
+    this.LastRegisteredOrderBlock
+
+
+export method updateOrderBlocks(OrderBlocksHolder this, int currentBarIndex, int currentOpenTime, float currentOpenPrice, float currentClosePrice) =>
+    float bodyLo = math.min(currentClosePrice, currentOpenPrice)
+    float bodyHi = math.max(currentClosePrice, currentOpenPrice)
+
+    array<OrderBlock> obs    = this.getRegisteredOrderBlocks()
+    int               obCnt  = obs.size()
+
+    for i = 1 to ( ( obCnt > 0 ) ? obCnt : na )
+        OrderBlock ob = obs.get(i - 1)
+        if ( not( ob.IsConfirmed ) )
+            continue
+
+        bool wasBreaker = ob.IsBreaker
+        if ( ob.isBullish() )
+            if ( not( wasBreaker ) and ( bodyLo < ob.LowPrice ) )
+                ob.markBreaker(currentBarIndex, currentOpenTime)
+            else if ( wasBreaker and ( currentClosePrice > ob.HighPrice ) )
+                this.removeOrderBlock(ob.OpenTime)
+        else
+            if ( not( wasBreaker ) and ( bodyHi > ob.HighPrice ) )
+                ob.markBreaker(currentBarIndex, currentOpenTime)
+            else if ( wasBreaker and ( currentClosePrice < ob.LowPrice ) )
+                this.removeOrderBlock(ob.OpenTime)
+    true
+
+
+//====================================================================
+// OrderBlocksStorage METHODS
+//====================================================================
+
+export getStorageInstance() =>
+    OrderBlocksStorage.new(map.new<int, OrderBlocksHolder>())
+
+
+export method getOrderBlocksHolder(OrderBlocksStorage this, int holderKey, bool createIfNotExists = true, int maxSizeIfCreate = 5) =>
+    OrderBlocksHolder holder = this.MapHolders.get(holderKey)
+    if ( na(holder) and createIfNotExists )
+        holder := OrderBlocksHolder.new(
+            MapOrderBlocks           = map.new<int, OrderBlock>(),
+            LastRegisteredOrderBlock = na,
+            CachedValues             = array.new<OrderBlock>(),
+            IsCacheInSync            = true
+        )
+        holder.setMaxSize(maxSizeIfCreate)
+        this.MapHolders.put(holderKey, holder)
+    holder
+
+
+//====================================================================
+// Drawings METHODS
+//====================================================================
+
+export method deleteDrawings(Drawings this) =>
+    linefill.delete(this.LineFill)
+    linefill.delete(this.BreakerLineFill)
+    line.delete(this.TopLine)
+    line.delete(this.BottomLine)
+    line.delete(this.BreakerTopLine)
+    line.delete(this.BreakerBottomLine)
+    line.delete(this.MidLine)
+    line.delete(this.SwingBreakLine)
+    line.delete(this.MssLine)
+    label.delete(this.MssLabel)
+    label.delete(this.Label)
+    this.LineFill          := na
+    this.BreakerLineFill   := na
+    this.TopLine           := na
+    this.BottomLine        := na
+    this.BreakerTopLine    := na
+    this.BreakerBottomLine := na
+    this.MidLine           := na
+    this.SwingBreakLine    := na
+    this.MssLine           := na
+    this.MssLabel          := na
+    this.Label             := na
+
+
+method computeStateColors(Drawings this, OrderBlockType obType) =>
+    Settings settings    = this.Settings
+    OrderBlock       ob          = this.OrderBlock
+    bool             isBull      = obType.isBullish()
+    bool             isBreaker   = ob.IsBreaker
+    bool             isConfirmed = ob.IsConfirmed
+
+    color lineCol          = na
+    color fillCol          = na
+    color mitigatedLineCol = na
+    color mitigatedFillCol = na
+
+    if ( not( isConfirmed ) )
+        lineCol := isBull ? settings.BullishUnconfirmedLineColor : settings.BearishUnconfirmedLineColor
+        fillCol := isBull ? settings.BullishUnconfirmedFillColor : settings.BearishUnconfirmedFillColor
+    else if ( isBreaker )
+        lineCol          := isBull ? settings.BullishBreakerLineColor   : settings.BearishBreakerLineColor
+        fillCol          := isBull ? settings.BullishBreakerFillColor   : settings.BearishBreakerFillColor
+        mitigatedLineCol := isBull ? settings.BullishMitigatedLineColor : settings.BearishMitigatedLineColor
+        mitigatedFillCol := isBull ? settings.BullishMitigatedFillColor : settings.BearishMitigatedFillColor
+    else
+        lineCol := isBull ? settings.BullishLineColor : settings.BearishLineColor
+        fillCol := isBull ? settings.BullishFillColor : settings.BearishFillColor
+
+    string labelText = isConfirmed ? ( isBreaker ? "BRK" : "OB" ) : "👁"
+    [lineCol, fillCol, mitigatedLineCol, mitigatedFillCol, settings.LabelColor, labelText]
+
+
+method computeRightEdge(Drawings this, float currentPrice, float atr) =>
+    Settings settings = this.Settings
+    OrderBlock       ob       = this.OrderBlock
+
+    bool inRange = ( not( settings.EnableDistanceFilter ) or ob.isWithinDistance(currentPrice, atr, settings.DistanceAtrMultiplier) )
+
+    int rightEdge = time
+    if ( not( inRange ) )
+        int anchor  = ob.IsBreaker ? ob.FlippedByOpenTime : ob.OpenTime
+        int retract = ( anchor + ( settings.OutOfRangeOffsetBars * CURRENT_TIMEFRAME_IN_MILLISECONDS ) )
+        rightEdge  := math.min(retract, time)
+    rightEdge
+
+
+export method buildDrawings(Drawings this, OrderBlockType obType, float currentPrice = 0.0, float atr = 0.0) =>
+    if ( not( na(this.OrderBlock) ) )
+        Settings settings = this.Settings
+        OrderBlock       ob       = this.OrderBlock
+        float            midPrice = ( ( ob.HighPrice + ob.LowPrice ) / 2.0 )
+        [lineCol, fillCol, mitigatedLineCol, mitigatedFillCol, labelCol, labelText] = this.computeStateColors(obType)
+
+        bool  isBreaker   = ( ob.IsBreaker and ob.IsConfirmed )
+        int   rightEdge   = this.computeRightEdge(currentPrice, atr)
+        int   labelX      = ( rightEdge + CURRENT_TIMEFRAME_IN_MILLISECONDS )
+        int   leftRight   = isBreaker ? ob.FlippedByOpenTime : rightEdge
+        color leftLineCol = isBreaker ? mitigatedLineCol     : lineCol
+        color leftFillCol = isBreaker ? mitigatedFillCol     : fillCol
+
+        this.TopLine    := line.new(ob.OpenTime, ob.HighPrice, leftRight, ob.HighPrice, xloc = xloc.bar_time, color = leftLineCol,           style = settings.LineStyle,    width = settings.LineWidth)
+        this.BottomLine := line.new(ob.OpenTime, ob.LowPrice,  leftRight, ob.LowPrice,  xloc = xloc.bar_time, color = leftLineCol,           style = settings.LineStyle,    width = settings.LineWidth)
+        this.LineFill   := linefill.new(this.TopLine, this.BottomLine, color = leftFillCol)
+        this.MidLine    := line.new(ob.OpenTime, midPrice,     rightEdge, midPrice,     xloc = xloc.bar_time, color = settings.MidLineColor, style = settings.MidLineStyle, width = settings.MidLineWidth)
+
+        if ( isBreaker )
+            this.BreakerTopLine    := line.new(ob.FlippedByOpenTime, ob.HighPrice, rightEdge, ob.HighPrice, xloc = xloc.bar_time, color = lineCol, style = settings.BreakerLineStyle, width = settings.LineWidth)
+            this.BreakerBottomLine := line.new(ob.FlippedByOpenTime, ob.LowPrice,  rightEdge, ob.LowPrice,  xloc = xloc.bar_time, color = lineCol, style = settings.BreakerLineStyle, width = settings.LineWidth)
+            this.BreakerLineFill   := linefill.new(this.BreakerTopLine, this.BreakerBottomLine, color = fillCol)
+
+        if ( settings.ShowLabel )
+            this.Label := label.new(labelX, midPrice, text = labelText, xloc = xloc.bar_time, style = label.style_label_center, color = color.new(color.black, 100), textcolor = labelCol, size = size.tiny, text_formatting = text.format_bold)
+
+        if ( settings.ShowSwingBreak and ( ob.SwingOpenTime > 0 ) )
+            bool   isBull    = obType.isBullish()
+            float  obEdge    = isBull ? ob.HighPrice : ob.LowPrice
+            int    breakTime = ( ob.BreakOpenTime > 0 ) ? ob.BreakOpenTime : rightEdge
+            int    midTime   = int(( ob.SwingOpenTime + breakTime ) / 2)
+            string mssStyle  = isBull ? label.style_label_down : label.style_label_up
+
+            this.SwingBreakLine := line.new(ob.OpenTime,      obEdge,        ob.OpenTime, ob.SwingPrice, xloc = xloc.bar_time, color = settings.SwingBreakColor, style = settings.SwingBreakStyle, width = settings.SwingBreakWidth)
+            this.MssLine        := line.new(ob.SwingOpenTime, ob.SwingPrice, breakTime,   ob.SwingPrice, xloc = xloc.bar_time, color = settings.SwingBreakColor, style = settings.SwingBreakStyle, width = settings.SwingBreakWidth)
+            this.MssLabel       := label.new(midTime, ob.SwingPrice, text = "MSS", xloc = xloc.bar_time, style = mssStyle, color = color.new(color.black, 100), textcolor = settings.SwingBreakColor, size = size.tiny, text_formatting = text.format_bold)
+
+        this.LineColor        := leftLineCol
+        this.FillColor        := leftFillCol
+        this.BreakerLineColor := isBreaker ? lineCol : na
+        this.BreakerFillColor := isBreaker ? fillCol : na
+        this.LabelColor       := labelCol
+        this.LabelText        := labelText
+
+
+export method updateDrawings(Drawings this, OrderBlockType obType, float currentPrice = 0.0, float atr = 0.0) =>
+    if ( not( na(this.OrderBlock) ) )
+        Settings settings = this.Settings
+        OrderBlock       ob       = this.OrderBlock
+        float            midPrice = ( ( ob.HighPrice + ob.LowPrice ) / 2.0 )
+        [lineCol, fillCol, mitigatedLineCol, mitigatedFillCol, labelCol, labelText] = this.computeStateColors(obType)
+
+        bool isBreaker       = ( ob.IsBreaker and ob.IsConfirmed )
+        bool needsConversion = ( isBreaker and na(this.BreakerTopLine) )
+        int  rightEdge       = this.computeRightEdge(currentPrice, atr)
+        int  labelX          = ( rightEdge + CURRENT_TIMEFRAME_IN_MILLISECONDS )
+
+        if ( needsConversion )
+            this.TopLine.set_xy2(ob.FlippedByOpenTime, ob.HighPrice)
+            this.BottomLine.set_xy2(ob.FlippedByOpenTime, ob.LowPrice)
+            this.TopLine.set_color(mitigatedLineCol)
+            this.BottomLine.set_color(mitigatedLineCol)
+            this.LineFill.set_color(mitigatedFillCol)
+            this.LineColor := mitigatedLineCol
+            this.FillColor := mitigatedFillCol
+
+            this.BreakerTopLine    := line.new(ob.FlippedByOpenTime, ob.HighPrice, rightEdge, ob.HighPrice, xloc = xloc.bar_time, color = lineCol, style = settings.BreakerLineStyle, width = settings.LineWidth)
+            this.BreakerBottomLine := line.new(ob.FlippedByOpenTime, ob.LowPrice,  rightEdge, ob.LowPrice,  xloc = xloc.bar_time, color = lineCol, style = settings.BreakerLineStyle, width = settings.LineWidth)
+            this.BreakerLineFill   := linefill.new(this.BreakerTopLine, this.BreakerBottomLine, color = fillCol)
+            this.BreakerLineColor := lineCol
+            this.BreakerFillColor := fillCol
+
+        if ( isBreaker )
+            this.BreakerTopLine.set_xy2(rightEdge, ob.HighPrice)
+            this.BreakerBottomLine.set_xy2(rightEdge, ob.LowPrice)
+        else
+            this.TopLine.set_xy2(rightEdge, ob.HighPrice)
+            this.BottomLine.set_xy2(rightEdge, ob.LowPrice)
+
+        this.MidLine.set_xy2(rightEdge, midPrice)
+        if ( not( na(this.Label) ) )
+            this.Label.set_xy(labelX, midPrice)
+
+        if ( isBreaker )
+            if ( this.BreakerLineColor != lineCol )
+                this.BreakerTopLine.set_color(lineCol)
+                this.BreakerBottomLine.set_color(lineCol)
+                this.BreakerLineColor := lineCol
+            if ( this.BreakerFillColor != fillCol )
+                this.BreakerLineFill.set_color(fillCol)
+                this.BreakerFillColor := fillCol
+        else
+            if ( this.LineColor != lineCol )
+                this.TopLine.set_color(lineCol)
+                this.BottomLine.set_color(lineCol)
+                this.LineColor := lineCol
+            if ( this.FillColor != fillCol )
+                this.LineFill.set_color(fillCol)
+                this.FillColor := fillCol
+
+        if ( not( na(this.Label) ) )
+            if ( this.LabelColor != labelCol )
+                this.Label.set_textcolor(labelCol)
+                this.LabelColor := labelCol
+            if ( this.LabelText != labelText )
+                this.Label.set_text(labelText)
+                this.LabelText := labelText
+
+
+//====================================================================
+// DrawingsHolder & DrawingsStorage METHODS
+//====================================================================
+
+export method clear(DrawingsHolder this) =>
+    if ( this.MapDrawings.size() > 0 )
+        for [_, drawing] in this.MapDrawings
+            if ( not( na(drawing) ) )
+                drawing.deleteDrawings()
+        this.MapDrawings.clear()
+
+
+export method enforceMaxSize(DrawingsHolder this, int maxSize) =>
+    if ( maxSize > 0 )
+        int overflow = ( this.MapDrawings.size() - maxSize )
+        if ( overflow > 0 )
+            if ( overflow == 1 )
+                for [mapKey, _] in this.MapDrawings
+                    Drawings evicted = this.MapDrawings.remove(mapKey)
+                    if ( not( na(evicted) ) )
+                        evicted.deleteDrawings()
+                    break
+            else
+                for [index, mapKey] in this.MapDrawings.keys()
+                    Drawings evicted = this.MapDrawings.remove(mapKey)
+                    if ( not( na(evicted) ) )
+                        evicted.deleteDrawings()
+                    if ( index == ( overflow - 1 ) )
+                        break
+    else
+        this.clear()
+
+
+export method setMaxSize(DrawingsHolder this, int maxSize) =>
+    this.MaxSize := ( maxSize > 0 ) ? maxSize : 0
+    this.enforceMaxSize(this.MaxSize)
+
+
+export method removeDrawings(DrawingsHolder this, int drawingKey) =>
+    Drawings oldDrawings = this.MapDrawings.remove(drawingKey)
+    if ( not( na(oldDrawings) ) )
+        oldDrawings.deleteDrawings()
+    oldDrawings
+
+
+export method registerDrawings(DrawingsHolder this, int drawingKey, Drawings drawings) =>
+    Drawings oldDrawings = na
+    if ( ( this.MaxSize > 0 ) and not( na(drawings) ) )
+        oldDrawings := this.MapDrawings.put(drawingKey, drawings)
+        if ( not( na(oldDrawings) ) )
+            oldDrawings.deleteDrawings()
+        this.enforceMaxSize(this.MaxSize)
+    else if ( not( na(drawings) ) )
+        drawings.deleteDrawings()
+    oldDrawings
+
+
+export method synchronizeDrawings(DrawingsHolder this, OrderBlocksHolder obHolder, OrderBlockType obType, Settings settings, float currentPrice = 0.0, float atr = 0.0) =>
+    if ( this.MaxSize <= 0 )
+        this.clear()
+    else
+        for drawingKey in this.MapDrawings.keys()
+            Drawings drawing = this.MapDrawings.get(drawingKey)
+            bool obExists              = ( not( na(obHolder) ) and obHolder.MapOrderBlocks.contains(drawingKey) )
+            bool isDummy               = ( not( na(drawing.OrderBlock) ) and not( drawing.OrderBlock.IsConfirmed ) )
+            bool keepRealtimeDum       = ( isDummy and not( barstate.isconfirmed ) )
+            if ( not( obExists ) and not( keepRealtimeDum ) )
+                this.removeDrawings(drawingKey)
+
+        if ( not( na(obHolder) ) )
+            array<OrderBlock> allObs   = obHolder.getRegisteredOrderBlocks()
+            int               totalObs = allObs.size()
+            int               startIdx = math.max(0, totalObs - this.MaxSize)
+
+            for drawingKey in this.MapDrawings.keys()
+                Drawings existingD = this.MapDrawings.get(drawingKey)
+                bool isRealtimeDummy         = ( not( na(existingD.OrderBlock) ) and not( existingD.OrderBlock.IsConfirmed ) and not( barstate.isconfirmed ) )
+                if ( not( isRealtimeDummy ) )
+                    bool inRecentSlice = false
+                    for i = startIdx to ( ( totalObs > 0 ) ? ( totalObs - 1 ) : na )
+                        if ( allObs.get(i).OpenTime == drawingKey )
+                            inRecentSlice := true
+                            break
+                    if ( not( inRecentSlice ) )
+                        this.removeDrawings(drawingKey)
+
+            for i = startIdx to ( ( totalObs > 0 ) ? ( totalObs - 1 ) : na )
+                OrderBlock ob = allObs.get(i)
+                int        k  = ob.OpenTime
+                Drawings drawing = this.MapDrawings.get(k)
+                if ( na(drawing) )
+                    this.enforceMaxSize(this.MaxSize - 1)
+                    drawing := Drawings.new(OrderBlock = ob, Settings = settings)
+                    drawing.buildDrawings(obType, currentPrice, atr)
+                    this.MapDrawings.put(k, drawing)
+                    true
+                else
+                    drawing.OrderBlock := ob
+                    drawing.Settings   := settings
+                    drawing.updateDrawings(obType, currentPrice, atr)
+                    true
+
+
+export getDrawingsStorageInstance() =>
+    DrawingsStorage.new(MapHolders = map.new<int, DrawingsHolder>())
+
+
+export method getDrawingsHolder(DrawingsStorage this, int holderKey, bool createIfNotExists = true, int maxSizeIfCreate = 5) =>
+    DrawingsHolder drawingsHolder = this.MapDrawings.get(holderKey)
+    if ( na(drawingsHolder) and createIfNotExists )
+        drawingsHolder := DrawingsHolder.new(
+            MapDrawings = map.new<int, Drawings>(),
+            MaxSize     = maxSizeIfCreate
+        )
+        this.MapHolders.put(holderKey, drawingsHolder)
+    drawingsHolder

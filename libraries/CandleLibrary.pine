@@ -1,0 +1,247 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+library("CandleLibrary", overlay = true)
+
+
+//====================================================================
+// TYPES
+//====================================================================
+
+export type Candle
+    varip float OpenPrice     = 0
+    varip float HighPrice     = 0
+    varip float LowPrice      = 0
+    varip float ClosePrice    = 0
+
+    varip int   OpenTime      = 0
+    varip int   CloseTime     = 0
+    varip int   BarIndex      = 0
+
+    varip int   OpenBarIndex      = 0
+    varip int   HighBarIndex      = 0
+    varip int   LowBarIndex       = 0
+    varip int   CloseBarIndex     = 0
+
+    varip bool  IsSessionFirstBar = false 
+    varip bool  IsSessionLastBar  = false
+
+    varip bool IsPSP              = false 
+
+export type CandlesHolder
+    varip map<int, Candle> MapCandles           = na
+    varip Candle           LastRegisteredCandle = na
+    varip array<Candle>    CachedValues         = na
+    varip bool             IsCacheInSync        = false
+    varip int              MaxSize              = 50
+
+
+export type CandlesStorage
+    varip map<int, CandlesHolder> MapHolders = na
+
+
+//====================================================================
+// Candle METHODS
+//====================================================================
+
+export method setPrices(Candle this, float openPrice = open, float highPrice = high, float lowPrice = low, float closePrice = close) =>
+    this.OpenPrice  := nz(openPrice)
+    this.HighPrice  := nz(highPrice)
+    this.LowPrice   := nz(lowPrice)
+    this.ClosePrice := nz(closePrice)
+
+
+export method setBarIndex(Candle this, int barIndex = bar_index, bool syncSubIndices = true) =>
+    int bi = nz(barIndex)
+    this.BarIndex := bi
+    if ( syncSubIndices )
+        this.OpenBarIndex  := bi
+        this.HighBarIndex  := bi
+        this.LowBarIndex   := bi
+        this.CloseBarIndex := bi
+
+
+export method setOpenCloseTime(Candle this, int openTime = time, int closeTime = time_close) =>
+    this.OpenTime  := nz(openTime)
+    this.CloseTime := nz(closeTime)
+
+
+export method setSessionInfo(Candle this, bool isSessionFirstBar = session.isfirstbar, bool isSessionLastBar = session.islastbar) =>
+    this.IsSessionFirstBar := isSessionFirstBar
+    this.IsSessionLastBar  := isSessionLastBar
+
+
+// Merges a newer LTF candle's price/bar-index data into an in-progress HTF candle.
+export method mergeWithLtfCandle(Candle this, Candle ltfCandle) =>
+    if ( not( na(ltfCandle) ) )
+        this.ClosePrice       := ltfCandle.ClosePrice
+        this.CloseBarIndex    := ltfCandle.CloseBarIndex
+        this.IsSessionLastBar := ltfCandle.IsSessionLastBar
+        if ( ltfCandle.HighPrice > this.HighPrice )
+            this.HighPrice    := ltfCandle.HighPrice
+            this.HighBarIndex := ltfCandle.HighBarIndex
+        if ( ltfCandle.LowPrice < this.LowPrice )
+            this.LowPrice    := ltfCandle.LowPrice
+            this.LowBarIndex := ltfCandle.LowBarIndex
+
+
+export method isBearish(Candle this) =>
+    (this.OpenPrice > this.ClosePrice)
+
+
+export method isBullish(Candle this) =>
+    (this.OpenPrice < this.ClosePrice)
+
+
+export method isNeutral(Candle this) =>
+    (this.OpenPrice == this.ClosePrice)
+
+
+export method isDoji(Candle this) =>
+    (math.abs(this.ClosePrice - this.OpenPrice) <= ((this.HighPrice - this.LowPrice) * 0.1))
+
+
+export method bodyTopPrice(Candle this) =>
+    math.max(this.OpenPrice, this.ClosePrice)
+
+
+export method bodyBottomPrice(Candle this) =>
+    math.min(this.OpenPrice, this.ClosePrice)
+
+
+export method bodySize(Candle this) =>
+    math.abs(this.ClosePrice - this.OpenPrice)
+
+
+export method rangeSize(Candle this) =>
+    this.HighPrice - this.LowPrice
+
+
+export method upperWickSize(Candle this) =>
+    this.HighPrice - math.max(this.OpenPrice, this.ClosePrice)
+
+
+export method lowerWickSize(Candle this) =>
+    math.min(this.OpenPrice, this.ClosePrice) - this.LowPrice
+
+
+export method logPrices(Candle this) =>
+    log.info('O: ' + str.tostring(this.OpenPrice) + ' H: ' + str.tostring(this.HighPrice) + ' L: ' + str.tostring(this.LowPrice) + ' C: ' + str.tostring(this.ClosePrice))
+
+
+export method logOpenCloseTime(Candle this, string timezone = "America/New_York") =>
+    log.info('OT: ' + str.format_time(this.OpenTime, "yyyy-MM-dd HH:mm:ss", timezone) + ' CT: ' + str.format_time(this.CloseTime, "yyyy-MM-dd HH:mm:ss", timezone))
+
+
+//====================================================================
+// CandlesHolder METHODS
+//====================================================================
+
+export method clear(CandlesHolder this) =>
+    if ( this.MapCandles.size() > 0 )
+        this.MapCandles.clear()
+        this.CachedValues.clear()
+
+    if ( this.MaxSize < 0 )
+        this.MaxSize := 0
+
+    this.LastRegisteredCandle := na
+    this.IsCacheInSync        := true
+
+
+export method enforceMaxSize(CandlesHolder this) =>
+    if ( this.MaxSize > 0 )
+        int overflow = this.MapCandles.size() - this.MaxSize
+        if ( overflow > 0 )
+            if ( overflow == 1 )
+                for [mapKey, _] in this.MapCandles
+                    this.MapCandles.remove(mapKey)
+                    break
+            else
+                for [index, mapKey] in this.MapCandles.keys()
+                    this.MapCandles.remove(mapKey)
+                    if ( index == (overflow - 1) )
+                        break
+            this.IsCacheInSync := false
+    else
+        this.clear()
+
+
+export method setMaxSize(CandlesHolder this, int maxSize) =>
+    this.MaxSize := (maxSize > 0) ? maxSize : 0
+    this.enforceMaxSize()
+
+
+export method registerCandle(CandlesHolder this, int candleId, Candle candle) =>
+    Candle existingCandle = na
+    if ( (this.MaxSize > 0) and not( na(candle) ) )
+        this.LastRegisteredCandle := candle
+        existingCandle            := this.MapCandles.put(candleId, candle)
+        this.IsCacheInSync        := false
+        this.enforceMaxSize()
+    existingCandle
+
+
+export method getCandle(CandlesHolder this, int candleId) =>
+    this.MapCandles.get(candleId)
+
+
+export method hasRegisteredCandle(CandlesHolder this, int candleId) =>
+    this.MapCandles.contains(candleId)
+
+
+export method getRegisteredCandles(CandlesHolder this) =>
+    if ( not( this.IsCacheInSync ) )
+        this.CachedValues  := this.MapCandles.values()
+        this.IsCacheInSync := true
+    this.CachedValues
+
+
+export method removeCandle(CandlesHolder this, int candleId) =>
+    Candle removedCandle = this.MapCandles.remove(candleId)
+    if ( not( na(removedCandle) ) )
+        this.IsCacheInSync := false
+        if ( this.MapCandles.size() == 0 )
+            this.LastRegisteredCandle := na
+        else if ( removedCandle.OpenTime == this.LastRegisteredCandle.OpenTime )
+            this.LastRegisteredCandle := this.getRegisteredCandles().last()
+    removedCandle
+
+
+export method countCandles(CandlesHolder this) =>
+    this.MapCandles.size()
+
+
+export method getLastRegisteredCandle(CandlesHolder this) =>
+    this.LastRegisteredCandle
+
+
+export method getLastRegisteredOpenTime(CandlesHolder this) =>
+    na(this.LastRegisteredCandle) ? 0 : this.LastRegisteredCandle.OpenTime
+
+
+//====================================================================
+// CandlesStorage CONSTRUCTOR
+//====================================================================
+
+export getStorageInstance() =>
+    CandlesStorage.new(map.new<int, CandlesHolder>())
+
+
+//====================================================================
+// CandlesStorage METHODS
+//====================================================================
+
+export method getCandlesHolder(CandlesStorage this, int holderKey, bool createIfNotExists = true, int maxSizeIfCreate = 50) =>
+    CandlesHolder candlesHolder = this.MapHolders.get(holderKey)
+    if ( na(candlesHolder) and createIfNotExists )
+        candlesHolder := CandlesHolder.new(
+            MapCandles           = map.new<int, Candle>(),
+            LastRegisteredCandle = na,
+            CachedValues         = array.new<Candle>(),
+            IsCacheInSync        = true
+        )
+        candlesHolder.setMaxSize(maxSizeIfCreate)
+        this.MapHolders.put(holderKey, candlesHolder)
+    candlesHolder

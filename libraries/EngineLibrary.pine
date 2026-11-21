@@ -1,0 +1,1716 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+library("EngineLibrary", overlay = true)
+
+import MihChe/HelperLibrary/1    as HelperLib
+import MihChe/AssetLibrary/1     as AssetLib
+import MihChe/TimeFrameLibrary/1 as TimeFrameLib
+import MihChe/CandleLibrary/1    as CandleLib
+import MihChe/SwingLibrary/1     as SwingLib
+import MihChe/GapLibrary/1       as GapLib
+import MihChe/SmtLibrary/1       as SmtLib
+
+
+//====================================================================
+// MODULE-LEVEL CACHED VALUES
+//====================================================================
+
+var int CURRENT_YEAR                 = year(last_bar_time)
+var int CURRENT_TIMEFRAME_IN_SECONDS = timeframe.in_seconds(timeframe.period)
+
+
+//====================================================================
+// TYPES
+//====================================================================
+
+export type Settings
+    map<string, int> MonitoredTimeFramesMap = na
+    map<string, int> SmtMonitoredTimeFrames = na
+    bool             EnableSecondAsset      = true
+    bool             EnableThirdAsset       = true
+    string           CustomSecondTicker     = na
+    string           CustomThirdTicker      = na
+    int              MaxBullishSmts         = 5
+    int              MaxBearishSmts         = 5
+    bool             PreviewLivePsp         = false
+
+
+export type Storages
+    varip CandleLib.CandlesStorage       CandlesStorage       = na
+    varip SwingLib.SwingsStorage         SwingsStorage        = na
+    varip GapLib.GapsStorage             GapsStorage          = na
+    varip TimeFrameLib.TimeFramesStorage TimeFramesStorage    = na
+    varip SmtLib.SmtCandidatesStorage    SmtCandidatesStorage = na
+    SmtLib.DrawingsStorage               SmtDrawingsStorage   = na
+
+
+export type RuntimeSnapshot
+    varip int                        TimeFrameInSeconds    = 0
+
+    varip CandleLib.CandlesHolder    MainHolder            = na
+    varip CandleLib.CandlesHolder    SecondHolder          = na
+    varip CandleLib.CandlesHolder    ThirdHolder           = na
+
+    varip SwingLib.SwingsHolder      MainSwingHighHolder   = na
+    varip SwingLib.SwingsHolder      MainSwingLowHolder    = na
+    varip SwingLib.SwingsHolder      SecondSwingHighHolder = na
+    varip SwingLib.SwingsHolder      SecondSwingLowHolder  = na
+    varip SwingLib.SwingsHolder      ThirdSwingHighHolder  = na
+    varip SwingLib.SwingsHolder      ThirdSwingLowHolder   = na
+
+    varip GapLib.GapsHolder          MainBullFvgHolder     = na
+    varip GapLib.GapsHolder          MainBearFvgHolder     = na
+    varip GapLib.GapsHolder          SecondBullFvgHolder   = na
+    varip GapLib.GapsHolder          SecondBearFvgHolder   = na
+    varip GapLib.GapsHolder          ThirdBullFvgHolder    = na
+    varip GapLib.GapsHolder          ThirdBearFvgHolder    = na
+
+    varip SmtLib.SmtCandidatesHolder SecondBullSmtHolder   = na
+    varip SmtLib.SmtCandidatesHolder SecondBearSmtHolder   = na
+    varip SmtLib.SmtCandidatesHolder ThirdBullSmtHolder    = na
+    varip SmtLib.SmtCandidatesHolder ThirdBearSmtHolder    = na
+
+    varip bool                       IsSmtMonitored        = false
+    varip bool                       IsSynced              = false
+    varip int                        SyncTime              = 0
+    varip CandleLib.Candle           MainAssetCandle       = na
+    varip CandleLib.Candle           SecondAssetCandle     = na
+    varip CandleLib.Candle           ThirdAssetCandle      = na
+
+    varip int                        PrevSyncTime          = 0
+    varip CandleLib.Candle           PrevMainAssetCandle   = na
+    varip CandleLib.Candle           PrevSecondAssetCandle = na
+    varip CandleLib.Candle           PrevThirdAssetCandle  = na
+
+
+export type LiveCandles
+    varip CandleLib.Candle MainAssetCandle   = na
+    varip CandleLib.Candle SecondAssetCandle = na
+    varip CandleLib.Candle ThirdAssetCandle  = na
+
+
+export type Engine
+    Settings                        Settings                = na
+    AssetLib.Assets                 Assets                  = na
+    Storages                        Storages                = na
+    LiveCandles                     LiveCandles             = na
+    varip map<int, RuntimeSnapshot> RuntimeSnapshotsMap     = na
+    varip map<int, int>             ChartPspMap             = na
+    map<int, int>                   ActiveDisplayEndBarsMap = na
+
+
+//====================================================================
+// PURE CONVERSION & GAP BUILDERS
+//====================================================================
+
+getSwingInstanceFromCandle(SwingLib.SwingType swingType, CandleLib.Candle candle) =>
+    SwingLib.Swing.new(
+        IntType       = swingType.toIntType(),
+        BarIndex      = candle.BarIndex,
+        OpenTime      = candle.OpenTime,
+        CloseTime     = candle.CloseTime,
+        OpenPrice     = candle.OpenPrice,
+        HighPrice     = candle.HighPrice,
+        LowPrice      = candle.LowPrice,
+        ClosePrice    = candle.ClosePrice,
+        OpenBarIndex  = candle.OpenBarIndex,
+        HighBarIndex  = candle.HighBarIndex,
+        LowBarIndex   = candle.LowBarIndex,
+        CloseBarIndex = candle.CloseBarIndex,
+        IsPSP         = candle.IsPSP
+    )
+
+
+isBullishVolumeImbalance(CandleLib.Candle previousCandle, CandleLib.Candle currentCandle) =>
+    ( ( currentCandle.OpenPrice > previousCandle.ClosePrice ) and currentCandle.isBullish() and previousCandle.isBullish() )
+
+
+isBearishVolumeImbalance(CandleLib.Candle previousCandle, CandleLib.Candle currentCandle) =>
+    ( ( currentCandle.OpenPrice < previousCandle.ClosePrice ) and currentCandle.isBearish() and previousCandle.isBearish() )
+
+
+buildBullishFairValueGap(CandleLib.Candle leftCandle, CandleLib.Candle rightCandle, bool hasLowerVi, bool hasUpperVi) =>
+    GapLib.Gap gap = GapLib.Gap.new()
+    gap.setType(GapLib.GapType.FVG, true)
+    gap.TopPrice     := hasUpperVi ? rightCandle.OpenPrice : rightCandle.LowPrice
+    gap.BottomPrice  := hasLowerVi ? leftCandle.ClosePrice : leftCandle.HighPrice
+    gap.BarIndex     := leftCandle.BarIndex
+    gap.LeftEdgeTime := leftCandle.OpenTime
+    gap.OpenTime     := rightCandle.OpenTime
+    gap
+
+
+buildBearishFairValueGap(CandleLib.Candle leftCandle, CandleLib.Candle rightCandle, bool hasUpperVi, bool hasLowerVi) =>
+    GapLib.Gap gap = GapLib.Gap.new()
+    gap.setType(GapLib.GapType.FVG, false)
+    gap.TopPrice     := hasUpperVi ? leftCandle.ClosePrice : leftCandle.LowPrice
+    gap.BottomPrice  := hasLowerVi ? rightCandle.OpenPrice : rightCandle.HighPrice
+    gap.BarIndex     := leftCandle.BarIndex
+    gap.LeftEdgeTime := leftCandle.OpenTime
+    gap.OpenTime     := rightCandle.OpenTime
+    gap
+
+
+buildBullishVolumeImbalance(CandleLib.Candle previousCandle, CandleLib.Candle currentCandle) =>
+    GapLib.Gap gap = GapLib.Gap.new()
+    gap.setType(GapLib.GapType.VI, true)
+    gap.TopPrice     := currentCandle.OpenPrice
+    gap.BottomPrice  := previousCandle.ClosePrice
+    gap.BarIndex     := previousCandle.BarIndex
+    gap.LeftEdgeTime := previousCandle.OpenTime
+    gap.OpenTime     := currentCandle.OpenTime
+    gap
+
+
+buildBearishVolumeImbalance(CandleLib.Candle previousCandle, CandleLib.Candle currentCandle) =>
+    GapLib.Gap gap = GapLib.Gap.new()
+    gap.setType(GapLib.GapType.VI, false)
+    gap.TopPrice     := previousCandle.ClosePrice
+    gap.BottomPrice  := currentCandle.OpenPrice
+    gap.BarIndex     := previousCandle.BarIndex
+    gap.LeftEdgeTime := previousCandle.OpenTime
+    gap.OpenTime     := currentCandle.OpenTime
+    gap
+
+
+buildBullishOpeningGap(GapLib.GapType gapType, float previousClosePrice, int openingBarIndex, int openingTime, float openingPrice) =>
+    GapLib.Gap gap = GapLib.Gap.new()
+    gap.setType(gapType, true)
+    gap.TopPrice     := openingPrice
+    gap.BottomPrice  := previousClosePrice
+    gap.BarIndex     := openingBarIndex
+    gap.LeftEdgeTime := openingTime
+    gap.OpenTime     := openingTime
+    gap
+
+
+buildBearishOpeningGap(GapLib.GapType gapType, float previousClosePrice, int openingBarIndex, int openingTime, float openingPrice) =>
+    GapLib.Gap gap = GapLib.Gap.new()
+    gap.setType(gapType, false)
+    gap.TopPrice     := previousClosePrice
+    gap.BottomPrice  := openingPrice
+    gap.BarIndex     := openingBarIndex
+    gap.LeftEdgeTime := openingTime
+    gap.OpenTime     := openingTime
+    gap
+
+
+//====================================================================
+// SETTINGS & ENGINE CONSTRUCTORS
+//====================================================================
+
+export getSettingsInstance(bool enableSecondAsset = true, bool enableThirdAsset = true, string customSecondTicker = na, string customThirdTicker = na, int maxBullishSmts = 5, int maxBearishSmts = 5, bool previewLivePsp = false) =>
+    Settings.new(
+        MonitoredTimeFramesMap = map.new<string, int>(),
+        SmtMonitoredTimeFrames = map.new<string, int>(),
+        EnableSecondAsset      = enableSecondAsset,
+        EnableThirdAsset       = enableThirdAsset,
+        CustomSecondTicker     = customSecondTicker,
+        CustomThirdTicker      = customThirdTicker,
+        MaxBullishSmts         = math.max(0, math.min(5, maxBullishSmts)),
+        MaxBearishSmts         = math.max(0, math.min(5, maxBearishSmts)),
+        PreviewLivePsp         = previewLivePsp
+    )
+
+
+export getEngineInstance(Settings engineSettings = na) =>
+    Settings resolvedSettings = na(engineSettings) ? getSettingsInstance() : engineSettings
+    if ( na(resolvedSettings.MonitoredTimeFramesMap) )
+        resolvedSettings.MonitoredTimeFramesMap := map.new<string, int>()
+    if ( na(resolvedSettings.SmtMonitoredTimeFrames) )
+        resolvedSettings.SmtMonitoredTimeFrames := map.new<string, int>()
+
+    var Engine engineInstance = Engine.new(
+        Settings = resolvedSettings,
+        Assets   = AssetLib.getAssetsInstance(
+            resolvedSettings.EnableSecondAsset,
+            resolvedSettings.EnableThirdAsset,
+            resolvedSettings.CustomSecondTicker,
+            resolvedSettings.CustomThirdTicker
+        ),
+        Storages = Storages.new(
+            CandlesStorage       = CandleLib.getStorageInstance(),
+            SwingsStorage        = SwingLib.getStorageInstance(),
+            GapsStorage          = GapLib.getStorageInstance(),
+            TimeFramesStorage    = TimeFrameLib.getStorageInstance(),
+            SmtCandidatesStorage = SmtLib.getStorageInstance(),
+            SmtDrawingsStorage   = SmtLib.getDrawingsStorageInstance()
+        ),
+        LiveCandles = LiveCandles.new(
+            MainAssetCandle   = CandleLib.Candle.new(),
+            SecondAssetCandle = CandleLib.Candle.new(),
+            ThirdAssetCandle  = CandleLib.Candle.new()
+        ),
+        RuntimeSnapshotsMap     = map.new<int, RuntimeSnapshot>(),
+        ChartPspMap             = map.new<int, int>(),
+        ActiveDisplayEndBarsMap = map.new<int, int>()
+    )
+    engineInstance
+
+
+export method initializeTimeFrames(Engine this, bool showHtfSmt = true) =>
+    if ( this.Assets.IsMainAssetPaired )
+        this.Settings.MonitoredTimeFramesMap.clear()
+        this.Settings.SmtMonitoredTimeFrames.clear()
+
+        for candidateTf in array.from("3M", "1M", "1W", "1D", "360", "240", "90", "60", "30", "15", "5", "3", "1")
+            int tfSeconds = timeframe.in_seconds(candidateTf)
+            if ( CURRENT_TIMEFRAME_IN_SECONDS >= tfSeconds )
+                continue
+            if ( ( CURRENT_TIMEFRAME_IN_SECONDS <= 21600 ) and ( tfSeconds > 2628003 ) )
+                continue
+            if ( ( CURRENT_TIMEFRAME_IN_SECONDS <= 14400 ) and ( tfSeconds > 604800 ) )
+                continue
+            if ( ( CURRENT_TIMEFRAME_IN_SECONDS <= 5400 ) and ( tfSeconds > 86400 ) )
+                continue
+            if ( ( CURRENT_TIMEFRAME_IN_SECONDS <= 900 ) and ( tfSeconds > 86400 ) )
+                continue
+            if ( ( CURRENT_TIMEFRAME_IN_SECONDS <= 300 ) and ( tfSeconds > 5400 ) )
+                continue
+            if ( ( CURRENT_TIMEFRAME_IN_SECONDS <= 60 ) and ( tfSeconds > 900 ) )
+                continue
+            if ( timeframe.isintraday and ( ( tfSeconds % CURRENT_TIMEFRAME_IN_SECONDS ) != 0 ) )
+                continue
+
+            this.Settings.MonitoredTimeFramesMap.put(candidateTf, tfSeconds)
+
+        this.Settings.MonitoredTimeFramesMap.remove(timeframe.period)
+        this.Settings.MonitoredTimeFramesMap.put(timeframe.period, CURRENT_TIMEFRAME_IN_SECONDS)
+
+        array<string> smtHtfTargets = array.new<string>()
+        if ( showHtfSmt )
+            smtHtfTargets := switch
+                ( CURRENT_TIMEFRAME_IN_SECONDS <= 60 )     => array.from("15", "5")
+                ( CURRENT_TIMEFRAME_IN_SECONDS <= 300 )    => array.from("15")
+                ( CURRENT_TIMEFRAME_IN_SECONDS <= 900 )    => array.from("240", "90", "60")
+                ( CURRENT_TIMEFRAME_IN_SECONDS <= 1800 )   => array.from("360", "90")
+                ( CURRENT_TIMEFRAME_IN_SECONDS <= 3600 )   => array.from("1D", "240")
+                ( CURRENT_TIMEFRAME_IN_SECONDS <= 5400 )   => array.from("1D", "360")
+                ( CURRENT_TIMEFRAME_IN_SECONDS <= 21600 )  => array.from("1W", "1D")
+                ( CURRENT_TIMEFRAME_IN_SECONDS <= 86400 )  => array.from("1M", "1W")
+                ( CURRENT_TIMEFRAME_IN_SECONDS <= 604800 ) => array.from("3M", "1M")
+                =>                                            array.from("3M")
+
+        for [monTf, monTfSec] in this.Settings.MonitoredTimeFramesMap
+            if ( ( monTf == timeframe.period ) or smtHtfTargets.includes(monTf) )
+                this.Settings.SmtMonitoredTimeFrames.put(monTf, monTfSec)
+
+        array<int> smtTfSeconds = this.Settings.SmtMonitoredTimeFrames.values()
+        for [tfSec, existingSnap] in this.RuntimeSnapshotsMap
+            existingSnap.IsSmtMonitored := smtTfSeconds.includes(tfSec)
+
+
+//====================================================================
+// STORAGE & SNAPSHOT ACCESSORS
+//====================================================================
+
+export method getCandlesHolder(Engine this, int assetId, int timeFrameInSeconds) =>
+    int holderKey = HelperLib.getCompositeIntKey(0, assetId, timeFrameInSeconds)
+    this.Storages.CandlesStorage.getCandlesHolder(holderKey)
+
+
+export method getSwingsHolder(Engine this, SwingLib.SwingType swingType, int assetId, int timeFrameInSeconds) =>
+    int holderKey = HelperLib.getCompositeIntKey(swingType.toIntType(), assetId, timeFrameInSeconds)
+    this.Storages.SwingsStorage.getSwingsHolder(holderKey)
+
+
+// NDOG and NWOG use a single chronological holder per asset (polarity ignored, MaxSize = 2).
+// FVG and VI use separate Bullish and Bearish holders per (asset, tf) (MaxSize = 25 each).
+export method getGapsHolder(Engine this, GapLib.GapType gapType, int assetId, int timeFrameInSeconds, GapLib.GapPolarity gapPolarity = GapLib.GapPolarity.Bullish) =>
+    bool isOpeningGap = ( gapType.isNewWeekOpeningGap() or gapType.isNewDayOpeningGap() )
+
+    int holderTimeFrame = switch
+        gapType.isNewWeekOpeningGap() => TimeFrameLib.SECONDS_IN_A_WEEK
+        gapType.isNewDayOpeningGap()  => TimeFrameLib.SECONDS_IN_A_DAY
+        =>                               timeFrameInSeconds
+
+    int polarityOffset = isOpeningGap ? 0 : gapPolarity.toIntPolarity()
+    int groupId        = ((gapType.toIntType() * 2) + polarityOffset)
+    int holderKey      = HelperLib.getCompositeIntKey(groupId, assetId, holderTimeFrame)
+    int maxSize        = isOpeningGap ? 2 : 25
+
+    this.Storages.GapsStorage.getGapsHolder(holderKey, maxSizeIfCreate = maxSize)
+
+
+export method getTimeFramesHolder(Engine this, int assetId, int timeFrameInSeconds) =>
+    int holderKey = HelperLib.getCompositeIntKey(0, assetId, timeFrameInSeconds)
+    this.Storages.TimeFramesStorage.getTimeFramesHolder(holderKey)
+
+
+export method getSmtCandidatesHolder(Engine this, SmtLib.SmtDirection smtDirection, int assetId, int timeFrameInSeconds) =>
+    int holderKey = HelperLib.getCompositeIntKey(smtDirection.toIntDirection(), assetId, timeFrameInSeconds)
+    this.Storages.SmtCandidatesStorage.getSmtCandidatesHolder(holderKey)
+
+
+export method getSmtDrawingsHolder(Engine this, SmtLib.SmtDirection smtDirection, int assetId = 0, int timeFrameInSeconds = 0) =>
+    int holderKey = HelperLib.getCompositeIntKey(smtDirection.toIntDirection(), assetId, timeFrameInSeconds)
+    this.Storages.SmtDrawingsStorage.getDrawingsHolder(holderKey, maxSizeIfCreate = 5)
+
+
+export method getHolderForAsset(RuntimeSnapshot this, int assetId) =>
+    CandleLib.CandlesHolder holder = switch assetId
+        AssetLib.MAIN_ASSET_ID   => this.MainHolder
+        AssetLib.SECOND_ASSET_ID => this.SecondHolder
+        AssetLib.THIRD_ASSET_ID  => this.ThirdHolder
+        =>                          na
+    holder
+
+
+export method getSwingHoldersForAsset(RuntimeSnapshot this, int assetId) =>
+    switch assetId
+        AssetLib.MAIN_ASSET_ID   => [this.MainSwingHighHolder,   this.MainSwingLowHolder]
+        AssetLib.SECOND_ASSET_ID => [this.SecondSwingHighHolder, this.SecondSwingLowHolder]
+        AssetLib.THIRD_ASSET_ID  => [this.ThirdSwingHighHolder,  this.ThirdSwingLowHolder]
+        =>                          [na, na]
+
+
+export method getFvgHoldersForAsset(RuntimeSnapshot this, int assetId) =>
+    switch assetId
+        AssetLib.MAIN_ASSET_ID   => [this.MainBullFvgHolder,   this.MainBearFvgHolder]
+        AssetLib.SECOND_ASSET_ID => [this.SecondBullFvgHolder, this.SecondBearFvgHolder]
+        AssetLib.THIRD_ASSET_ID  => [this.ThirdBullFvgHolder,  this.ThirdBearFvgHolder]
+        =>                          [na, na]
+
+
+export method getSmtHoldersForAsset(RuntimeSnapshot this, int corrAssetId) =>
+    switch corrAssetId
+        AssetLib.SECOND_ASSET_ID => [this.SecondBullSmtHolder, this.SecondBearSmtHolder]
+        AssetLib.THIRD_ASSET_ID  => [this.ThirdBullSmtHolder,  this.ThirdBearSmtHolder]
+        =>                          [na, na]
+
+
+export method getSmtHolderForAsset(RuntimeSnapshot this, int corrAssetId, SmtLib.SmtDirection smtDirection) =>
+    [bullHolder, bearHolder] = this.getSmtHoldersForAsset(corrAssetId)
+    smtDirection.isBullish() ? bullHolder : bearHolder
+
+
+export method getCandlesForAsset(RuntimeSnapshot this, int assetId) =>
+    switch assetId
+        AssetLib.MAIN_ASSET_ID   => [this.MainAssetCandle,   this.PrevMainAssetCandle]
+        AssetLib.SECOND_ASSET_ID => [this.SecondAssetCandle, this.PrevSecondAssetCandle]
+        AssetLib.THIRD_ASSET_ID  => [this.ThirdAssetCandle,  this.PrevThirdAssetCandle]
+        =>                          [na, na]
+
+
+export method getRuntimeSnapshot(Engine this, int timeFrameInSeconds) =>
+    RuntimeSnapshot snapshot = this.RuntimeSnapshotsMap.get(timeFrameInSeconds)
+    if ( na(snapshot) )
+        bool secondEnabled = this.Assets.isSecondAssetEnabled()
+        bool thirdEnabled  = this.Assets.isThirdAssetEnabled()
+
+        bool isSmtTf = this.Settings.SmtMonitoredTimeFrames.values().includes(timeFrameInSeconds)
+
+        snapshot := RuntimeSnapshot.new(
+            TimeFrameInSeconds    = timeFrameInSeconds,
+            IsSmtMonitored        = isSmtTf,
+            MainHolder            = this.getCandlesHolder(this.Assets.MainAssetId, timeFrameInSeconds),
+            SecondHolder          = secondEnabled ? this.getCandlesHolder(this.Assets.SecondAssetId, timeFrameInSeconds) : na,
+            ThirdHolder           = thirdEnabled  ? this.getCandlesHolder(this.Assets.ThirdAssetId,  timeFrameInSeconds) : na,
+            MainSwingHighHolder   = this.getSwingsHolder(SwingLib.SwingType.SwingHigh, this.Assets.MainAssetId,   timeFrameInSeconds),
+            MainSwingLowHolder    = this.getSwingsHolder(SwingLib.SwingType.SwingLow,  this.Assets.MainAssetId,   timeFrameInSeconds),
+            SecondSwingHighHolder = secondEnabled ? this.getSwingsHolder(SwingLib.SwingType.SwingHigh, this.Assets.SecondAssetId, timeFrameInSeconds) : na,
+            SecondSwingLowHolder  = secondEnabled ? this.getSwingsHolder(SwingLib.SwingType.SwingLow,  this.Assets.SecondAssetId, timeFrameInSeconds) : na,
+            ThirdSwingHighHolder  = thirdEnabled  ? this.getSwingsHolder(SwingLib.SwingType.SwingHigh, this.Assets.ThirdAssetId,  timeFrameInSeconds) : na,
+            ThirdSwingLowHolder   = thirdEnabled  ? this.getSwingsHolder(SwingLib.SwingType.SwingLow,  this.Assets.ThirdAssetId,  timeFrameInSeconds) : na,
+            MainBullFvgHolder     = this.getGapsHolder(GapLib.GapType.FVG, this.Assets.MainAssetId,   timeFrameInSeconds, GapLib.GapPolarity.Bullish),
+            MainBearFvgHolder     = this.getGapsHolder(GapLib.GapType.FVG, this.Assets.MainAssetId,   timeFrameInSeconds, GapLib.GapPolarity.Bearish),
+            SecondBullFvgHolder   = secondEnabled ? this.getGapsHolder(GapLib.GapType.FVG, this.Assets.SecondAssetId, timeFrameInSeconds, GapLib.GapPolarity.Bullish) : na,
+            SecondBearFvgHolder   = secondEnabled ? this.getGapsHolder(GapLib.GapType.FVG, this.Assets.SecondAssetId, timeFrameInSeconds, GapLib.GapPolarity.Bearish) : na,
+            ThirdBullFvgHolder    = thirdEnabled  ? this.getGapsHolder(GapLib.GapType.FVG, this.Assets.ThirdAssetId,  timeFrameInSeconds, GapLib.GapPolarity.Bullish) : na,
+            ThirdBearFvgHolder    = thirdEnabled  ? this.getGapsHolder(GapLib.GapType.FVG, this.Assets.ThirdAssetId,  timeFrameInSeconds, GapLib.GapPolarity.Bearish) : na,
+            SecondBullSmtHolder   = secondEnabled ? this.getSmtCandidatesHolder(SmtLib.SmtDirection.Bullish, this.Assets.SecondAssetId, timeFrameInSeconds) : na,
+            SecondBearSmtHolder   = secondEnabled ? this.getSmtCandidatesHolder(SmtLib.SmtDirection.Bearish, this.Assets.SecondAssetId, timeFrameInSeconds) : na,
+            ThirdBullSmtHolder    = thirdEnabled  ? this.getSmtCandidatesHolder(SmtLib.SmtDirection.Bullish, this.Assets.ThirdAssetId,  timeFrameInSeconds) : na,
+            ThirdBearSmtHolder    = thirdEnabled  ? this.getSmtCandidatesHolder(SmtLib.SmtDirection.Bearish, this.Assets.ThirdAssetId,  timeFrameInSeconds) : na
+        )
+        this.RuntimeSnapshotsMap.put(timeFrameInSeconds, snapshot)
+    snapshot
+
+
+//====================================================================
+// SMT DETECTION & OUTWARD-ONLY ENDPOINT TRACKING
+//====================================================================
+
+const int MAX_BARS_BACK_SAFE = 4900
+
+
+formatTimeFrameShortLabel(int tfSeconds) =>
+    string labelStr = switch
+        ( tfSeconds == 60 )      => "1m"
+        ( tfSeconds == 180 )     => "3m"
+        ( tfSeconds == 300 )     => "5m"
+        ( tfSeconds == 900 )     => "15m"
+        ( tfSeconds == 1800 )    => "30m"
+        ( tfSeconds == 3600 )    => "1H"
+        ( tfSeconds == 5400 )    => "90m"
+        ( tfSeconds == 14400 )   => "4H"
+        ( tfSeconds == 21600 )   => "6H"
+        ( tfSeconds == 86400 )   => "1D"
+        ( tfSeconds == 604800 )  => "1W"
+        ( tfSeconds == 2628003 ) => "1M"
+        ( tfSeconds == 7884009 ) => "3M"
+        ( tfSeconds < 3600 )     => str.tostring(int(tfSeconds / 60)) + "m"
+        ( tfSeconds < 86400 )    => str.tostring(int(tfSeconds / 3600)) + "H"
+        =>                          str.tostring(int(tfSeconds / 86400)) + "D"
+    labelStr
+
+
+evalSmtCandidateOnCandle(SmtLib.SmtCandidate cand, CandleLib.Candle mainCandle, CandleLib.Candle corrCandle, CandleLib.Candle otherCandle, bool isClosedTfBar, int lastClosedTfCloseTime, SwingLib.SwingsHolder mainSwingHolder, SwingLib.SwingsHolder corrSwingHolder) =>
+    bool keepAlive = true
+
+    if ( ( last_bar_index - cand.StartBarIndex ) > MAX_BARS_BACK_SAFE )
+        keepAlive := false
+    else if ( mainCandle.OpenTime > cand.OpenTime )
+        int prevEndOpenTime = cand.EndOpenTime
+
+        if ( isClosedTfBar and ( cand.isSequential() or cand.isGapFill() ) )
+            bool becameSwing = ( mainSwingHolder.hasRegisteredSwing(cand.OpenTime) or corrSwingHolder.hasRegisteredSwing(cand.OpenTime) )
+            if ( becameSwing )
+                cand.IntType := SmtLib.SmtType.SwingPoint.toIntType()
+
+        if ( isClosedTfBar and not( cand.EndPointLocked ) and ( cand.EndBarIndex > cand.StartBarIndex ) )
+            bool endBecameSwing = ( mainSwingHolder.hasRegisteredSwing(cand.EndOpenTime) or corrSwingHolder.hasRegisteredSwing(cand.EndOpenTime) )
+            if ( endBecameSwing )
+                cand.EndPointLocked := true
+
+        int  prevEndBarIndex = cand.EndBarIndex
+        bool isFirstSweep    = ( prevEndBarIndex <= cand.StartBarIndex )
+        bool inOpenTfPeriod  = ( ( lastClosedTfCloseTime > 0 ) and ( cand.EndOpenTime >= lastClosedTfCloseTime ) and ( mainCandle.OpenTime >= lastClosedTfCloseTime ) )
+        bool sameEndPeriod   = ( isFirstSweep or ( mainCandle.OpenTime <= cand.EndOpenTime ) or inOpenTfPeriod )
+        bool hasOther        = ( not( na(otherCandle) ) and ( otherCandle.OpenTime == mainCandle.OpenTime ) )
+
+        if ( cand.isBearish() )
+            float mainHigh  = mainCandle.HighPrice
+            int   mainIdx   = mainCandle.HighBarIndex
+            float corrHigh  = corrCandle.HighPrice
+            float otherHigh = hasOther ? otherCandle.HighPrice : 0.0
+
+            bool mainTrigNow = ( mainHigh > cand.MainTriggerPrice )
+            bool corrTrigNow = ( corrHigh > cand.CorrTriggerPrice )
+            bool mainInvNow  = ( mainHigh > cand.MainInvalidPrice )
+            bool corrInvNow  = ( corrHigh > cand.CorrInvalidPrice )
+
+            cand.MainTriggered   := ( cand.MainTriggered   or mainTrigNow )
+            cand.CorrTriggered   := ( cand.CorrTriggered   or corrTrigNow )
+            cand.MainInvalidated := ( cand.MainInvalidated or mainInvNow )
+            cand.CorrInvalidated := ( cand.CorrInvalidated or corrInvNow )
+
+            if ( cand.isInvalid() )
+                keepAlive := false
+            else if ( not( cand.EndPointLocked and cand.isSequential() ) )
+                bool otherExtend        = ( not( hasOther ) or ( cand.OtherEndPrice <= 0.0 ) or ( otherHigh >= cand.OtherEndPrice ) )
+                bool allExtend          = ( ( mainHigh >= cand.MainEndPrice ) and ( corrHigh >= cand.CorrEndPrice ) and otherExtend )
+                bool samePeriodMainPush = ( isFirstSweep or ( mainHigh >= cand.MainEndPrice ) )
+                bool canExtend          = cand.EndPointLocked ? allExtend : ( sameEndPeriod ? samePeriodMainPush : allExtend )
+
+                if ( canExtend and ( ( mainTrigNow and not( cand.CorrInvalidated ) ) or ( corrTrigNow and not( cand.MainInvalidated ) ) ) )
+                    if ( cand.EndPointLocked and ( mainCandle.OpenTime > prevEndOpenTime ) )
+                        cand.EndPointLocked := false
+                    cand.EndBarIndex   := mainIdx
+                    cand.EndOpenTime   := mainCandle.OpenTime
+                    cand.MainEndPrice  := mainHigh
+                    cand.CorrEndPrice  := corrHigh
+                    cand.OtherEndPrice := otherHigh
+        else
+            float mainLow  = mainCandle.LowPrice
+            int   mainIdx  = mainCandle.LowBarIndex
+            float corrLow  = corrCandle.LowPrice
+            float otherLow = hasOther ? otherCandle.LowPrice : 0.0
+
+            bool mainTrigNow = ( mainLow < cand.MainTriggerPrice )
+            bool corrTrigNow = ( corrLow < cand.CorrTriggerPrice )
+            bool mainInvNow  = ( mainLow < cand.MainInvalidPrice )
+            bool corrInvNow  = ( corrLow < cand.CorrInvalidPrice )
+
+            cand.MainTriggered   := ( cand.MainTriggered   or mainTrigNow )
+            cand.CorrTriggered   := ( cand.CorrTriggered   or corrTrigNow )
+            cand.MainInvalidated := ( cand.MainInvalidated or mainInvNow )
+            cand.CorrInvalidated := ( cand.CorrInvalidated or corrInvNow )
+
+            if ( cand.isInvalid() )
+                keepAlive := false
+            else if ( not( cand.EndPointLocked and cand.isSequential() ) )
+                bool otherExtend        = ( not( hasOther ) or ( cand.OtherEndPrice <= 0.0 ) or ( otherLow <= cand.OtherEndPrice ) )
+                bool allExtend          = ( ( mainLow <= cand.MainEndPrice ) and ( corrLow <= cand.CorrEndPrice ) and otherExtend )
+                bool samePeriodMainPush = ( isFirstSweep or ( mainLow <= cand.MainEndPrice ) )
+                bool canExtend          = cand.EndPointLocked ? allExtend : ( sameEndPeriod ? samePeriodMainPush : allExtend )
+
+                if ( canExtend and ( ( mainTrigNow and not( cand.CorrInvalidated ) ) or ( corrTrigNow and not( cand.MainInvalidated ) ) ) )
+                    if ( cand.EndPointLocked and ( mainCandle.OpenTime > prevEndOpenTime ) )
+                        cand.EndPointLocked := false
+                    cand.EndBarIndex   := mainIdx
+                    cand.EndOpenTime   := mainCandle.OpenTime
+                    cand.MainEndPrice  := mainLow
+                    cand.CorrEndPrice  := corrLow
+                    cand.OtherEndPrice := otherLow
+
+        if ( keepAlive and isClosedTfBar and cand.isSequential() and ( prevEndOpenTime > cand.OpenTime ) and ( cand.EndOpenTime > prevEndOpenTime ) )
+            keepAlive := false
+
+    keepAlive
+
+
+isSequentialInSameTfRoof(RuntimeSnapshot snapshot, SmtLib.SmtCandidate seqCand) =>
+    bool inRoof = false
+    SmtLib.SmtDirection dir = seqCand.isBearish() ? SmtLib.SmtDirection.Bearish : SmtLib.SmtDirection.Bullish
+
+    SmtLib.SmtCandidatesHolder secondHolder = snapshot.getSmtHolderForAsset(AssetLib.SECOND_ASSET_ID, dir)
+    if ( not( na(secondHolder) ) )
+        for other in secondHolder.getRegisteredSmtCandidates()
+            if ( other.isActive() and ( other.OpenTime != seqCand.OpenTime ) )
+                if ( ( other.StartBarIndex == seqCand.EndBarIndex ) or ( other.EndBarIndex == seqCand.StartBarIndex ) )
+                    inRoof := true
+                    break
+
+    if ( not( inRoof ) )
+        SmtLib.SmtCandidatesHolder thirdHolder = snapshot.getSmtHolderForAsset(AssetLib.THIRD_ASSET_ID, dir)
+        if ( not( na(thirdHolder) ) )
+            for other in thirdHolder.getRegisteredSmtCandidates()
+                if ( other.isActive() and ( other.OpenTime != seqCand.OpenTime ) )
+                    if ( ( other.StartBarIndex == seqCand.EndBarIndex ) or ( other.EndBarIndex == seqCand.StartBarIndex ) )
+                        inRoof := true
+                        break
+    inRoof
+
+
+pruneOlderSequentialSmts(RuntimeSnapshot snapshot, SmtLib.SmtCandidatesHolder holder, int newStartOpenTime) =>
+    for cand in holder.getRegisteredSmtCandidates()
+        if ( cand.isSequential() and cand.isActive() and ( cand.OpenTime != newStartOpenTime ) )
+            if ( not( isSequentialInSameTfRoof(snapshot, cand) ) )
+                holder.removeSmtCandidate(cand.OpenTime)
+
+
+expireNonRoofSequentialSmts(RuntimeSnapshot snapshot, SmtLib.SmtCandidatesHolder holder, int middleOpenTime, int currentOpenTime) =>
+    if ( not( na(holder) ) and ( holder.countSmtCandidates() > 0 ) )
+        for cand in holder.getRegisteredSmtCandidates()
+            if ( cand.isSequential() and ( cand.OpenTime < middleOpenTime ) )
+                bool stretchedPastBar2 = ( cand.EndOpenTime >= currentOpenTime )
+                if ( stretchedPastBar2 or not( isSequentialInSameTfRoof(snapshot, cand) ) )
+                    holder.removeSmtCandidate(cand.OpenTime)
+
+
+processPairClosedBarSmt(RuntimeSnapshot snapshot, int corrAssetId, CandleLib.Candle leftMain, CandleLib.Candle middleMain, CandleLib.Candle rightMain, CandleLib.Candle leftCorr, CandleLib.Candle middleCorr, CandleLib.Candle rightCorr, CandleLib.Candle middleOther, CandleLib.Candle rightOther) =>
+    [bullSmtHolder, bearSmtHolder]            = snapshot.getSmtHoldersForAsset(corrAssetId)
+    [corrSwingHighHolder, corrSwingLowHolder] = snapshot.getSwingHoldersForAsset(corrAssetId)
+    [corrBullFvgHolder, corrBearFvgHolder]    = snapshot.getFvgHoldersForAsset(corrAssetId)
+
+    int  tfSeconds             = snapshot.TimeFrameInSeconds
+    int  rightOpenTime         = rightMain.OpenTime
+    int  prevTfCloseTime       = na(middleMain) ? 0 : middleMain.CloseTime
+    bool allowGapAndSequential = ( tfSeconds >= 900 )
+    bool hasRightOther         = ( not( na(rightOther) ) and ( rightOther.OpenTime == rightOpenTime ) )
+    float rightOtherHigh       = hasRightOther ? rightOther.HighPrice : 0.0
+    float rightOtherLow        = hasRightOther ? rightOther.LowPrice  : 0.0
+
+    // 1. Update existing Bullish & Bearish candidates against newly closed bar (`rightMain` / `rightCorr` / `rightOther`)
+    for cand in bullSmtHolder.getRegisteredSmtCandidates()
+        bool wasActive = cand.isActive()
+        if ( not( evalSmtCandidateOnCandle(cand, rightMain, rightCorr, rightOther, true, prevTfCloseTime, snapshot.MainSwingLowHolder, corrSwingLowHolder) ) )
+            bullSmtHolder.removeSmtCandidate(cand.OpenTime)
+        else if ( cand.isActive() )
+            if ( not( cand.IsConfirmed ) )
+                cand.IsConfirmed := true
+            if ( not( wasActive ) and cand.isSequential() )
+                pruneOlderSequentialSmts(snapshot, bullSmtHolder, cand.OpenTime)
+
+    for cand in bearSmtHolder.getRegisteredSmtCandidates()
+        bool wasActive = cand.isActive()
+        if ( not( evalSmtCandidateOnCandle(cand, rightMain, rightCorr, rightOther, true, prevTfCloseTime, snapshot.MainSwingHighHolder, corrSwingHighHolder) ) )
+            bearSmtHolder.removeSmtCandidate(cand.OpenTime)
+        else if ( cand.isActive() )
+            if ( not( cand.IsConfirmed ) )
+                cand.IsConfirmed := true
+            if ( not( wasActive ) and cand.isSequential() )
+                pruneOlderSequentialSmts(snapshot, bearSmtHolder, cand.OpenTime)
+
+    // 2. SwingPoint promotion / creation & un-swept Sequential cleanup on `middleMain`
+    if ( not( na(middleMain) or na(middleCorr) ) )
+        int   midOpenTime   = middleMain.OpenTime
+        bool  hasMidOther   = ( not( na(middleOther) ) and ( middleOther.OpenTime == midOpenTime ) )
+        float midOtherHigh  = hasMidOther ? middleOther.HighPrice : 0.0
+        float midOtherLow   = hasMidOther ? middleOther.LowPrice  : 0.0
+
+        bool isBearSwing = ( snapshot.MainSwingHighHolder.hasRegisteredSwing(midOpenTime) or corrSwingHighHolder.hasRegisteredSwing(midOpenTime) )
+        bool isBullSwing = ( snapshot.MainSwingLowHolder.hasRegisteredSwing(midOpenTime)  or corrSwingLowHolder.hasRegisteredSwing(midOpenTime) )
+
+        // --- BEARISH (Highs) ---
+        SmtLib.SmtCandidate existingBear = bearSmtHolder.getSmtCandidate(midOpenTime)
+        if ( isBearSwing )
+            if ( not( na(existingBear) ) and ( existingBear.isSequential() or existingBear.isGapFill() ) )
+                existingBear.IntType := SmtLib.SmtType.SwingPoint.toIntType()
+                true
+            else if ( ( ( last_bar_index - middleMain.HighBarIndex ) <= MAX_BARS_BACK_SAFE ) and na(existingBear) )
+                SmtLib.SmtCandidate bearCand = SmtLib.SmtCandidate.new(
+                    IntDirection       = SmtLib.SmtDirection.Bearish.toIntDirection(),
+                    IntType            = SmtLib.SmtType.SwingPoint.toIntType(),
+                    TimeFrameInSeconds = tfSeconds,
+                    CorrAssetId        = corrAssetId,
+                    OpenTime           = midOpenTime,
+                    EndOpenTime        = midOpenTime,
+                    StartBarIndex      = middleMain.HighBarIndex,
+                    MainStartPrice     = middleMain.HighPrice,
+                    CorrStartPrice     = middleCorr.HighPrice,
+                    MainTriggerPrice   = middleMain.HighPrice,
+                    MainInvalidPrice   = middleMain.HighPrice,
+                    CorrTriggerPrice   = middleCorr.HighPrice,
+                    CorrInvalidPrice   = middleCorr.HighPrice,
+                    EndBarIndex        = middleMain.HighBarIndex,
+                    MainEndPrice       = middleMain.HighPrice,
+                    CorrEndPrice       = middleCorr.HighPrice,
+                    OtherEndPrice      = midOtherHigh
+                )
+                if ( evalSmtCandidateOnCandle(bearCand, rightMain, rightCorr, rightOther, true, prevTfCloseTime, snapshot.MainSwingHighHolder, corrSwingHighHolder) )
+                    if ( bearCand.isActive() )
+                        bearCand.IsConfirmed := true
+                    bearSmtHolder.registerSmtCandidate(bearCand)
+                true
+        else if ( not( na(existingBear) ) and existingBear.isSequential() )
+            if ( not( existingBear.isActive() ) )
+                bearSmtHolder.removeSmtCandidate(midOpenTime)
+            else
+                existingBear.EndOpenTime    := rightOpenTime
+                existingBear.EndPointLocked := true
+                pruneOlderSequentialSmts(snapshot, bearSmtHolder, midOpenTime)
+
+        // --- BULLISH (Lows) ---
+        SmtLib.SmtCandidate existingBull = bullSmtHolder.getSmtCandidate(midOpenTime)
+        if ( isBullSwing )
+            if ( not( na(existingBull) ) and ( existingBull.isSequential() or existingBull.isGapFill() ) )
+                existingBull.IntType := SmtLib.SmtType.SwingPoint.toIntType()
+                true
+            else if ( ( ( last_bar_index - middleMain.LowBarIndex ) <= MAX_BARS_BACK_SAFE ) and na(existingBull) )
+                SmtLib.SmtCandidate bullCand = SmtLib.SmtCandidate.new(
+                    IntDirection       = SmtLib.SmtDirection.Bullish.toIntDirection(),
+                    IntType            = SmtLib.SmtType.SwingPoint.toIntType(),
+                    TimeFrameInSeconds = tfSeconds,
+                    CorrAssetId        = corrAssetId,
+                    OpenTime           = midOpenTime,
+                    EndOpenTime        = midOpenTime,
+                    StartBarIndex      = middleMain.LowBarIndex,
+                    MainStartPrice     = middleMain.LowPrice,
+                    CorrStartPrice     = middleCorr.LowPrice,
+                    MainTriggerPrice   = middleMain.LowPrice,
+                    MainInvalidPrice   = middleMain.LowPrice,
+                    CorrTriggerPrice   = middleCorr.LowPrice,
+                    CorrInvalidPrice   = middleCorr.LowPrice,
+                    EndBarIndex        = middleMain.LowBarIndex,
+                    MainEndPrice       = middleMain.LowPrice,
+                    CorrEndPrice       = middleCorr.LowPrice,
+                    OtherEndPrice      = midOtherLow
+                )
+                if ( evalSmtCandidateOnCandle(bullCand, rightMain, rightCorr, rightOther, true, prevTfCloseTime, snapshot.MainSwingLowHolder, corrSwingLowHolder) )
+                    if ( bullCand.isActive() )
+                        bullCand.IsConfirmed := true
+                    bullSmtHolder.registerSmtCandidate(bullCand)
+                true
+        else if ( not( na(existingBull) ) and existingBull.isSequential() )
+            if ( not( existingBull.isActive() ) )
+                bullSmtHolder.removeSmtCandidate(midOpenTime)
+            else
+                existingBull.EndOpenTime    := rightOpenTime
+                existingBull.EndPointLocked := true
+                pruneOlderSequentialSmts(snapshot, bullSmtHolder, midOpenTime)
+
+    // 3 & 4. GapFill & Sequential (SSMT) ONLY on timeframes `>= 15m` (`tfSeconds >= 900`; `< 15m` is strictly SwingPoint-only)
+    if ( allowGapAndSequential )
+        if ( not( na(leftMain) or na(leftCorr) or na(middleMain) or na(middleCorr) ) )
+            if ( ( ( last_bar_index - rightMain.LowBarIndex ) <= MAX_BARS_BACK_SAFE ) and not( bullSmtHolder.hasRegisteredSmtCandidate(rightOpenTime) ) )
+                GapLib.Gap mainBullFvg = snapshot.MainBullFvgHolder.getGap(rightOpenTime)
+                GapLib.Gap corrBullFvg = corrBullFvgHolder.getGap(rightOpenTime)
+
+                if ( not( na(mainBullFvg) ) or not( na(corrBullFvg) ) )
+                    float mainLevel = rightMain.LowPrice
+                    float corrLevel = rightCorr.LowPrice
+
+                    SmtLib.SmtCandidate bullGapCand = SmtLib.SmtCandidate.new(
+                        IntDirection       = SmtLib.SmtDirection.Bullish.toIntDirection(),
+                        IntType            = SmtLib.SmtType.GapFill.toIntType(),
+                        TimeFrameInSeconds = tfSeconds,
+                        CorrAssetId        = corrAssetId,
+                        OpenTime           = rightOpenTime,
+                        EndOpenTime        = rightOpenTime,
+                        StartBarIndex      = rightMain.LowBarIndex,
+                        MainStartPrice     = mainLevel,
+                        CorrStartPrice     = corrLevel,
+                        MainTriggerPrice   = mainLevel,
+                        MainInvalidPrice   = mainLevel,
+                        CorrTriggerPrice   = corrLevel,
+                        CorrInvalidPrice   = corrLevel,
+                        EndBarIndex        = rightMain.LowBarIndex,
+                        MainEndPrice       = mainLevel,
+                        CorrEndPrice       = corrLevel,
+                        OtherEndPrice      = rightOtherLow
+                    )
+                    bullSmtHolder.registerSmtCandidate(bullGapCand)
+
+            if ( ( ( last_bar_index - rightMain.HighBarIndex ) <= MAX_BARS_BACK_SAFE ) and not( bearSmtHolder.hasRegisteredSmtCandidate(rightOpenTime) ) )
+                GapLib.Gap mainBearFvg = snapshot.MainBearFvgHolder.getGap(rightOpenTime)
+                GapLib.Gap corrBearFvg = corrBearFvgHolder.getGap(rightOpenTime)
+
+                if ( not( na(mainBearFvg) ) or not( na(corrBearFvg) ) )
+                    float mainLevel = rightMain.HighPrice
+                    float corrLevel = rightCorr.HighPrice
+
+                    SmtLib.SmtCandidate bearGapCand = SmtLib.SmtCandidate.new(
+                        IntDirection       = SmtLib.SmtDirection.Bearish.toIntDirection(),
+                        IntType            = SmtLib.SmtType.GapFill.toIntType(),
+                        TimeFrameInSeconds = tfSeconds,
+                        CorrAssetId        = corrAssetId,
+                        OpenTime           = rightOpenTime,
+                        EndOpenTime        = rightOpenTime,
+                        StartBarIndex      = rightMain.HighBarIndex,
+                        MainStartPrice     = mainLevel,
+                        CorrStartPrice     = corrLevel,
+                        MainTriggerPrice   = mainLevel,
+                        MainInvalidPrice   = mainLevel,
+                        CorrTriggerPrice   = corrLevel,
+                        CorrInvalidPrice   = corrLevel,
+                        EndBarIndex        = rightMain.HighBarIndex,
+                        MainEndPrice       = mainLevel,
+                        CorrEndPrice       = corrLevel,
+                        OtherEndPrice      = rightOtherHigh
+                    )
+                    bearSmtHolder.registerSmtCandidate(bearGapCand)
+
+        if ( ( ( last_bar_index - rightMain.LowBarIndex ) <= MAX_BARS_BACK_SAFE ) and not( bullSmtHolder.hasRegisteredSmtCandidate(rightOpenTime) ) )
+            SmtLib.SmtCandidate bullSeqCand = SmtLib.SmtCandidate.new(
+                IntDirection       = SmtLib.SmtDirection.Bullish.toIntDirection(),
+                IntType            = SmtLib.SmtType.Sequential.toIntType(),
+                TimeFrameInSeconds = tfSeconds,
+                CorrAssetId        = corrAssetId,
+                OpenTime           = rightOpenTime,
+                EndOpenTime        = rightOpenTime,
+                StartBarIndex      = rightMain.LowBarIndex,
+                MainStartPrice     = rightMain.LowPrice,
+                CorrStartPrice     = rightCorr.LowPrice,
+                MainTriggerPrice   = rightMain.LowPrice,
+                MainInvalidPrice   = rightMain.LowPrice,
+                CorrTriggerPrice   = rightCorr.LowPrice,
+                CorrInvalidPrice   = rightCorr.LowPrice,
+                EndBarIndex        = rightMain.LowBarIndex,
+                MainEndPrice       = rightMain.LowPrice,
+                CorrEndPrice       = rightCorr.LowPrice,
+                OtherEndPrice      = rightOtherLow
+            )
+            bullSmtHolder.registerSmtCandidate(bullSeqCand)
+
+        if ( ( ( last_bar_index - rightMain.HighBarIndex ) <= MAX_BARS_BACK_SAFE ) and not( bearSmtHolder.hasRegisteredSmtCandidate(rightOpenTime) ) )
+            SmtLib.SmtCandidate bearSeqCand = SmtLib.SmtCandidate.new(
+                IntDirection       = SmtLib.SmtDirection.Bearish.toIntDirection(),
+                IntType            = SmtLib.SmtType.Sequential.toIntType(),
+                TimeFrameInSeconds = tfSeconds,
+                CorrAssetId        = corrAssetId,
+                OpenTime           = rightOpenTime,
+                EndOpenTime        = rightOpenTime,
+                StartBarIndex      = rightMain.HighBarIndex,
+                MainStartPrice     = rightMain.HighPrice,
+                CorrStartPrice     = rightCorr.HighPrice,
+                MainTriggerPrice   = rightMain.HighPrice,
+                MainInvalidPrice   = rightMain.HighPrice,
+                CorrTriggerPrice   = rightCorr.HighPrice,
+                CorrInvalidPrice   = rightCorr.HighPrice,
+                EndBarIndex        = rightMain.HighBarIndex,
+                MainEndPrice       = rightMain.HighPrice,
+                CorrEndPrice       = rightCorr.HighPrice,
+                OtherEndPrice      = rightOtherHigh
+            )
+            bearSmtHolder.registerSmtCandidate(bearSeqCand)
+
+
+//====================================================================
+// CANDLE SYNCHRONIZATION, REGISTRATION & DATA COLLECTION
+//====================================================================
+
+method updateRuntimeSnapshot(Engine this, RuntimeSnapshot snapshot) =>
+    bool isSyncedNow = false
+
+    if ( this.Assets.IsMainAssetPaired )
+        CandleLib.Candle lastMainCandle = snapshot.MainHolder.LastRegisteredCandle
+        int mainOpenTime                = na(lastMainCandle) ? 0 : lastMainCandle.OpenTime
+
+        if ( mainOpenTime > 0 )
+            if ( mainOpenTime == snapshot.SyncTime )
+                isSyncedNow := true
+            else if ( mainOpenTime > snapshot.SyncTime )
+                bool secondEnabled = this.Assets.isSecondAssetEnabled()
+                bool thirdEnabled  = this.Assets.isThirdAssetEnabled()
+
+                CandleLib.Candle lastSecondCandle = secondEnabled ? snapshot.SecondHolder.LastRegisteredCandle : na
+                CandleLib.Candle lastThirdCandle  = thirdEnabled  ? snapshot.ThirdHolder.LastRegisteredCandle  : na
+
+                int secondOpenTime = na(lastSecondCandle) ? 1 : lastSecondCandle.OpenTime
+                int thirdOpenTime  = na(lastThirdCandle)  ? 2 : lastThirdCandle.OpenTime
+
+                bool isSecondSync = ( not( secondEnabled ) or ( secondOpenTime == mainOpenTime ) )
+                bool isThirdSync  = ( not( thirdEnabled )  or ( thirdOpenTime  == mainOpenTime ) )
+                isSyncedNow      := ( isSecondSync and isThirdSync )
+
+                if ( isSyncedNow )
+                    bool allBullish = ( lastMainCandle.isBullish() and ( not( secondEnabled ) or lastSecondCandle.isBullish() ) and ( not( thirdEnabled ) or lastThirdCandle.isBullish() ) )
+                    bool allBearish = ( lastMainCandle.isBearish() and ( not( secondEnabled ) or lastSecondCandle.isBearish() ) and ( not( thirdEnabled ) or lastThirdCandle.isBearish() ) )
+                    bool isPsp      = not( allBullish or allBearish )
+
+                    lastMainCandle.IsPSP := isPsp
+                    if ( secondEnabled )
+                        lastSecondCandle.IsPSP := isPsp
+                    if ( thirdEnabled )
+                        lastThirdCandle.IsPSP := isPsp
+
+                    CandleLib.Candle leftMain     = snapshot.PrevMainAssetCandle
+                    CandleLib.Candle middleMain   = snapshot.MainAssetCandle
+                    CandleLib.Candle leftSecond   = snapshot.PrevSecondAssetCandle
+                    CandleLib.Candle middleSecond = snapshot.SecondAssetCandle
+                    CandleLib.Candle leftThird    = snapshot.PrevThirdAssetCandle
+                    CandleLib.Candle middleThird  = snapshot.ThirdAssetCandle
+
+                    snapshot.PrevSyncTime          := snapshot.SyncTime
+                    snapshot.PrevMainAssetCandle   := snapshot.MainAssetCandle
+                    snapshot.PrevSecondAssetCandle := snapshot.SecondAssetCandle
+                    snapshot.PrevThirdAssetCandle  := snapshot.ThirdAssetCandle
+
+                    snapshot.SyncTime          := mainOpenTime
+                    snapshot.MainAssetCandle   := lastMainCandle
+                    snapshot.SecondAssetCandle := lastSecondCandle
+                    snapshot.ThirdAssetCandle  := lastThirdCandle
+
+                    if ( snapshot.IsSmtMonitored )
+                        if ( secondEnabled )
+                            processPairClosedBarSmt(snapshot, AssetLib.SECOND_ASSET_ID, leftMain, middleMain, lastMainCandle, leftSecond, middleSecond, lastSecondCandle, thirdEnabled ? middleThird : na, thirdEnabled ? lastThirdCandle : na)
+
+                        if ( thirdEnabled )
+                            processPairClosedBarSmt(snapshot, AssetLib.THIRD_ASSET_ID, leftMain, middleMain, lastMainCandle, leftThird, middleThird, lastThirdCandle, secondEnabled ? middleSecond : na, secondEnabled ? lastSecondCandle : na)
+
+                        if ( ( snapshot.TimeFrameInSeconds >= 900 ) and not( na(middleMain) ) )
+                            int midOpen = middleMain.OpenTime
+                            expireNonRoofSequentialSmts(snapshot, snapshot.SecondBullSmtHolder, midOpen, mainOpenTime)
+                            expireNonRoofSequentialSmts(snapshot, snapshot.SecondBearSmtHolder, midOpen, mainOpenTime)
+                            expireNonRoofSequentialSmts(snapshot, snapshot.ThirdBullSmtHolder,  midOpen, mainOpenTime)
+                            expireNonRoofSequentialSmts(snapshot, snapshot.ThirdBearSmtHolder,  midOpen, mainOpenTime)
+
+                    if ( snapshot.TimeFrameInSeconds == CURRENT_TIMEFRAME_IN_SECONDS )
+                        if ( isPsp )
+                            this.ChartPspMap.put(lastMainCandle.BarIndex, lastMainCandle.isBullish() ? 1 : -1)
+                            if ( this.ChartPspMap.size() > MAX_BARS_BACK_SAFE )
+                                for [oldestBi, _] in this.ChartPspMap
+                                    this.ChartPspMap.remove(oldestBi)
+                                    break
+
+                        bool isSessionEndConfirmed = ( session.islastbar and barstate.isconfirmed )
+                        bool isFridaySessionEnd    = ( isSessionEndConfirmed and ( dayofweek == dayofweek.friday ) )
+
+                        for [_, htfSec] in this.Settings.SmtMonitoredTimeFrames
+                            if ( htfSec <= CURRENT_TIMEFRAME_IN_SECONDS )
+                                continue
+
+                            RuntimeSnapshot htfSnapshot = this.getRuntimeSnapshot(htfSec)
+                            int  htfLastCloseTime       = na(htfSnapshot.MainAssetCandle) ? 0 : htfSnapshot.MainAssetCandle.CloseTime
+                            bool confirmAtSessionEnd    = ( isSessionEndConfirmed and ( ( htfSec <= TimeFrameLib.SECONDS_IN_A_DAY ) or ( isFridaySessionEnd and ( htfSec == TimeFrameLib.SECONDS_IN_A_WEEK ) ) ) )
+
+                            if ( secondEnabled )
+                                [secBullHtf, secBearHtf]          = htfSnapshot.getSmtHoldersForAsset(AssetLib.SECOND_ASSET_ID)
+                                [secSwingHighHtf, secSwingLowHtf] = htfSnapshot.getSwingHoldersForAsset(AssetLib.SECOND_ASSET_ID)
+                                CandleLib.Candle otherForSecHtf   = thirdEnabled ? lastThirdCandle : na
+
+                                for cand in secBullHtf.getRegisteredSmtCandidates()
+                                    bool wasActive = cand.isActive()
+                                    if ( not( evalSmtCandidateOnCandle(cand, lastMainCandle, lastSecondCandle, otherForSecHtf, false, htfLastCloseTime, htfSnapshot.MainSwingLowHolder, secSwingLowHtf) ) )
+                                        secBullHtf.removeSmtCandidate(cand.OpenTime)
+                                    else if ( cand.isActive() )
+                                        if ( confirmAtSessionEnd and not( cand.IsConfirmed ) )
+                                            cand.IsConfirmed := true
+                                        if ( not( wasActive ) and cand.isSequential() )
+                                            pruneOlderSequentialSmts(htfSnapshot, secBullHtf, cand.OpenTime)
+
+                                for cand in secBearHtf.getRegisteredSmtCandidates()
+                                    bool wasActive = cand.isActive()
+                                    if ( not( evalSmtCandidateOnCandle(cand, lastMainCandle, lastSecondCandle, otherForSecHtf, false, htfLastCloseTime, htfSnapshot.MainSwingHighHolder, secSwingHighHtf) ) )
+                                        secBearHtf.removeSmtCandidate(cand.OpenTime)
+                                    else if ( cand.isActive() )
+                                        if ( confirmAtSessionEnd and not( cand.IsConfirmed ) )
+                                            cand.IsConfirmed := true
+                                        if ( not( wasActive ) and cand.isSequential() )
+                                            pruneOlderSequentialSmts(htfSnapshot, secBearHtf, cand.OpenTime)
+
+                            if ( thirdEnabled )
+                                [trdBullHtf, trdBearHtf]          = htfSnapshot.getSmtHoldersForAsset(AssetLib.THIRD_ASSET_ID)
+                                [trdSwingHighHtf, trdSwingLowHtf] = htfSnapshot.getSwingHoldersForAsset(AssetLib.THIRD_ASSET_ID)
+                                CandleLib.Candle otherForTrdHtf   = secondEnabled ? lastSecondCandle : na
+
+                                for cand in trdBullHtf.getRegisteredSmtCandidates()
+                                    bool wasActive = cand.isActive()
+                                    if ( not( evalSmtCandidateOnCandle(cand, lastMainCandle, lastThirdCandle, otherForTrdHtf, false, htfLastCloseTime, htfSnapshot.MainSwingLowHolder, trdSwingLowHtf) ) )
+                                        trdBullHtf.removeSmtCandidate(cand.OpenTime)
+                                    else if ( cand.isActive() )
+                                        if ( confirmAtSessionEnd and not( cand.IsConfirmed ) )
+                                            cand.IsConfirmed := true
+                                        if ( not( wasActive ) and cand.isSequential() )
+                                            pruneOlderSequentialSmts(htfSnapshot, trdBullHtf, cand.OpenTime)
+
+                                for cand in trdBearHtf.getRegisteredSmtCandidates()
+                                    bool wasActive = cand.isActive()
+                                    if ( not( evalSmtCandidateOnCandle(cand, lastMainCandle, lastThirdCandle, otherForTrdHtf, false, htfLastCloseTime, htfSnapshot.MainSwingHighHolder, trdSwingHighHtf) ) )
+                                        trdBearHtf.removeSmtCandidate(cand.OpenTime)
+                                    else if ( cand.isActive() )
+                                        if ( confirmAtSessionEnd and not( cand.IsConfirmed ) )
+                                            cand.IsConfirmed := true
+                                        if ( not( wasActive ) and cand.isSequential() )
+                                            pruneOlderSequentialSmts(htfSnapshot, trdBearHtf, cand.OpenTime)
+
+    snapshot.IsSynced := isSyncedNow
+
+
+export method getLastSynchronizedCandles(Engine this, int timeFrameInSeconds) =>
+    RuntimeSnapshot snapshot = this.getRuntimeSnapshot(timeFrameInSeconds)
+    if ( snapshot.IsSynced )
+        [snapshot.SyncTime, snapshot.MainAssetCandle, snapshot.SecondAssetCandle, snapshot.ThirdAssetCandle]
+    else
+        [0, na, na, na]
+
+
+export method getPreviousSynchronizedCandles(Engine this, int timeFrameInSeconds) =>
+    RuntimeSnapshot snapshot = this.getRuntimeSnapshot(timeFrameInSeconds)
+    if ( snapshot.PrevSyncTime > 0 )
+        [snapshot.PrevSyncTime, snapshot.PrevMainAssetCandle, snapshot.PrevSecondAssetCandle, snapshot.PrevThirdAssetCandle]
+    else
+        [0, na, na, na]
+
+
+method registerSessionOpeningGap(Engine this, GapLib.GapType gapType, int assetId, float previousClosePrice, int openingBarIndex, int openingTime, float openingPrice) =>
+    bool allowedForChartTf = gapType.isNewWeekOpeningGap() ? ( CURRENT_TIMEFRAME_IN_SECONDS <= TimeFrameLib.SECONDS_IN_A_WEEK ) : ( CURRENT_TIMEFRAME_IN_SECONDS <= TimeFrameLib.SECONDS_IN_A_DAY )
+    if ( allowedForChartTf and not( na(previousClosePrice) or na(openingPrice) or na(openingTime) ) and ( openingPrice != previousClosePrice ) )
+        GapLib.GapsHolder holder = this.getGapsHolder(gapType, assetId, CURRENT_TIMEFRAME_IN_SECONDS)
+        if ( not( holder.hasRegisteredGap(openingTime) ) )
+            GapLib.Gap gap = ( openingPrice > previousClosePrice ) ? buildBullishOpeningGap(gapType, previousClosePrice, openingBarIndex, openingTime, openingPrice) : buildBearishOpeningGap(gapType, previousClosePrice, openingBarIndex, openingTime, openingPrice)
+            gap.IsConfirmed := true
+            holder.registerGap(gap.OpenTime, gap)
+
+
+applySingleAssetInvalidation(SmtLib.SmtCandidatesHolder bullHolder, SmtLib.SmtCandidatesHolder bearHolder, bool isMainSide, int candleOpenTime, float candleHigh, float candleLow) =>
+    if ( not( na(bullHolder) ) and ( bullHolder.countSmtCandidates() > 0 ) )
+        for cand in bullHolder.getRegisteredSmtCandidates()
+            if ( candleOpenTime > cand.OpenTime )
+                if ( isMainSide )
+                    if ( candleLow < cand.MainInvalidPrice )
+                        cand.MainTriggered   := true
+                        cand.MainInvalidated := true
+                else
+                    if ( candleLow < cand.CorrInvalidPrice )
+                        cand.CorrTriggered   := true
+                        cand.CorrInvalidated := true
+                if ( cand.isInvalid() )
+                    bullHolder.removeSmtCandidate(cand.OpenTime)
+
+    if ( not( na(bearHolder) ) and ( bearHolder.countSmtCandidates() > 0 ) )
+        for cand in bearHolder.getRegisteredSmtCandidates()
+            if ( candleOpenTime > cand.OpenTime )
+                if ( isMainSide )
+                    if ( candleHigh > cand.MainInvalidPrice )
+                        cand.MainTriggered   := true
+                        cand.MainInvalidated := true
+                else
+                    if ( candleHigh > cand.CorrInvalidPrice )
+                        cand.CorrTriggered   := true
+                        cand.CorrInvalidated := true
+                if ( cand.isInvalid() )
+                    bearHolder.removeSmtCandidate(cand.OpenTime)
+    true
+
+
+method invalidateSmtByAssetCandle(Engine this, int assetId, int timeFrameInSeconds, CandleLib.Candle candle) =>
+    for [_, smtTfSec] in this.Settings.SmtMonitoredTimeFrames
+        if ( smtTfSec < timeFrameInSeconds )
+            continue
+        RuntimeSnapshot smtSnap = this.getRuntimeSnapshot(smtTfSec)
+        if ( assetId == AssetLib.MAIN_ASSET_ID )
+            applySingleAssetInvalidation(smtSnap.SecondBullSmtHolder, smtSnap.SecondBearSmtHolder, true, candle.OpenTime, candle.HighPrice, candle.LowPrice)
+            applySingleAssetInvalidation(smtSnap.ThirdBullSmtHolder,  smtSnap.ThirdBearSmtHolder,  true, candle.OpenTime, candle.HighPrice, candle.LowPrice)
+        else if ( assetId == AssetLib.SECOND_ASSET_ID )
+            applySingleAssetInvalidation(smtSnap.SecondBullSmtHolder, smtSnap.SecondBearSmtHolder, false, candle.OpenTime, candle.HighPrice, candle.LowPrice)
+        else if ( assetId == AssetLib.THIRD_ASSET_ID )
+            applySingleAssetInvalidation(smtSnap.ThirdBullSmtHolder,  smtSnap.ThirdBearSmtHolder,  false, candle.OpenTime, candle.HighPrice, candle.LowPrice)
+    true
+
+
+export method registerCandle(Engine this, int monitoredAssetId, int timeFrameInSeconds, CandleLib.Candle rightCandle) =>
+    RuntimeSnapshot         snapshot      = this.getRuntimeSnapshot(timeFrameInSeconds)
+    CandleLib.CandlesHolder candlesHolder = snapshot.getHolderForAsset(monitoredAssetId)
+
+    if ( not( na(candlesHolder) ) and ( rightCandle.OpenTime > candlesHolder.getLastRegisteredOpenTime() ) )
+        [middleCandle, leftCandle] = snapshot.getCandlesForAsset(monitoredAssetId)
+
+        if ( not( na(middleCandle) or na(leftCandle) ) )
+            float middleHigh = middleCandle.HighPrice
+            float middleLow  = middleCandle.LowPrice
+            float rightHigh  = rightCandle.HighPrice
+            float rightLow   = rightCandle.LowPrice
+
+            // 1. Swing High & Swing Low Detection
+            [swingsHighHolder, swingsLowHolder] = snapshot.getSwingHoldersForAsset(monitoredAssetId)
+
+            if ( ( leftCandle.HighPrice < middleHigh ) and ( middleHigh > rightHigh ) )
+                swingsHighHolder.registerSwing(middleCandle.OpenTime, getSwingInstanceFromCandle(SwingLib.SwingType.SwingHigh, middleCandle))
+
+            if ( ( leftCandle.LowPrice > middleLow ) and ( middleLow < rightLow ) )
+                swingsLowHolder.registerSwing(middleCandle.OpenTime, getSwingInstanceFromCandle(SwingLib.SwingType.SwingLow, middleCandle))
+
+            // 2. FVG & Standalone VI Mitigation + Detection
+            [bullFvgHolder, bearFvgHolder] = snapshot.getFvgHoldersForAsset(monitoredAssetId)
+            GapLib.GapsHolder bullViHolder = this.getGapsHolder(GapLib.GapType.VI, monitoredAssetId, timeFrameInSeconds, GapLib.GapPolarity.Bullish)
+            GapLib.GapsHolder bearViHolder = this.getGapsHolder(GapLib.GapType.VI, monitoredAssetId, timeFrameInSeconds, GapLib.GapPolarity.Bearish)
+
+            bullFvgHolder.updateGaps(rightCandle.BarIndex, rightCandle.OpenTime, rightCandle.ClosePrice)
+            bearFvgHolder.updateGaps(rightCandle.BarIndex, rightCandle.OpenTime, rightCandle.ClosePrice)
+            bullViHolder.updateGaps(rightCandle.BarIndex,  rightCandle.OpenTime, rightCandle.ClosePrice)
+            bearViHolder.updateGaps(rightCandle.BarIndex,  rightCandle.OpenTime, rightCandle.ClosePrice)
+
+            // Intraday FVG / VI never bridge across a session open (e.g. 18:00 NY futures or 00:00 UTC crypto)
+            bool isIntraday       = ( timeFrameInSeconds < TimeFrameLib.SECONDS_IN_A_DAY )
+            bool hasSessionBridge = ( isIntraday and ( rightCandle.IsSessionFirstBar or middleCandle.IsSessionFirstBar ) )
+
+            if ( not( hasSessionBridge ) )
+                bool bullLowerVi = isBullishVolumeImbalance(leftCandle, middleCandle)
+                bool bullUpperVi = isBullishVolumeImbalance(middleCandle, rightCandle)
+                bool bearUpperVi = isBearishVolumeImbalance(leftCandle, middleCandle)
+                bool bearLowerVi = isBearishVolumeImbalance(middleCandle, rightCandle)
+
+                bool isBullFvg = ( leftCandle.HighPrice < rightCandle.LowPrice )
+                bool isBearFvg = ( leftCandle.LowPrice  > rightCandle.HighPrice )
+
+                if ( isBullFvg )
+                    if ( bullLowerVi )
+                        bullViHolder.removeGap(middleCandle.OpenTime)
+                    GapLib.Gap fvg = buildBullishFairValueGap(leftCandle, rightCandle, bullLowerVi, bullUpperVi)
+                    fvg.IsConfirmed := true
+                    bullFvgHolder.registerGap(fvg.OpenTime, fvg)
+                else if ( isBearFvg )
+                    if ( bearUpperVi )
+                        bearViHolder.removeGap(middleCandle.OpenTime)
+                    GapLib.Gap fvg = buildBearishFairValueGap(leftCandle, rightCandle, bearUpperVi, bearLowerVi)
+                    fvg.IsConfirmed := true
+                    bearFvgHolder.registerGap(fvg.OpenTime, fvg)
+                else if ( bullUpperVi )
+                    GapLib.Gap vi = buildBullishVolumeImbalance(middleCandle, rightCandle)
+                    vi.IsConfirmed := true
+                    bullViHolder.registerGap(vi.OpenTime, vi)
+                else if ( bearLowerVi )
+                    GapLib.Gap vi = buildBearishVolumeImbalance(middleCandle, rightCandle)
+                    vi.IsConfirmed := true
+                    bearViHolder.registerGap(vi.OpenTime, vi)
+
+        candlesHolder.registerCandle(rightCandle.OpenTime, rightCandle)
+        this.invalidateSmtByAssetCandle(monitoredAssetId, timeFrameInSeconds, rightCandle)
+        this.updateRuntimeSnapshot(snapshot)
+
+
+export method startMonitoringAssets(Engine this) =>
+    this.LiveCandles.MainAssetCandle.setBarIndex()
+    this.LiveCandles.MainAssetCandle.setOpenCloseTime()
+    this.LiveCandles.MainAssetCandle.setPrices()
+    this.LiveCandles.MainAssetCandle.setSessionInfo(session.isfirstbar, session.islastbar)
+
+    float mainPrevClose = close[1]
+
+    varip int  lastSessionWeekNumber    = 0
+    varip bool isCurrentWeekOpenSession = false
+    if ( barstate.isnew and session.isfirstbar )
+        int curWeekNumber        = TimeFrameLib.getWeekNumber(time_tradingday)
+        isCurrentWeekOpenSession := ( ( lastSessionWeekNumber > 0 ) and ( curWeekNumber != lastSessionWeekNumber ) )
+        lastSessionWeekNumber    := curWeekNumber
+
+    GapLib.GapType sessionGapType = isCurrentWeekOpenSession ? GapLib.GapType.NWOG : GapLib.GapType.NDOG
+
+    bool canRequestData = ( this.Assets.IsMainAssetPaired and not( barstate.isfirst ) and ( this.Settings.MonitoredTimeFramesMap.size() > 0 ) )
+
+    if ( canRequestData and not( timeframe.isintraday ) )
+        canRequestData := ( year >= ( CURRENT_YEAR - 3 ) )
+
+    if ( canRequestData and timeframe.isintraday )
+        canRequestData := ( year >= ( CURRENT_YEAR - 1 ) )
+
+    varip map<int, CandleLib.Candle> tempCandlesHolderMain = map.new<int, CandleLib.Candle>()
+    varip map<int, int>              lastHtfOpenTimeMap    = map.new<int, int>()
+
+    var int highestMonitoredTimeFrame = 0
+    if ( canRequestData and ( highestMonitoredTimeFrame == 0 ) )
+        highestMonitoredTimeFrame := this.Settings.MonitoredTimeFramesMap.values().max()
+
+    bool isInCurrentDayPeriod  = HelperLib.isBarInCurrentTradingDay()
+    bool isInLast2DaysPeriod   = HelperLib.isBarInLast_2_TradingDays()
+    bool isInLast5DaysPeriod   = HelperLib.isBarInLast_5_TradingDays()
+    bool isInLast2WeeksPeriod  = HelperLib.isBarInLast_2_TradingWeeks()
+    bool isInLast4WeeksPeriod  = HelperLib.isBarInLast_4_TradingWeeks()
+    bool isInLastMonthPeriod   = HelperLib.isBarInLast_1_TradingMonth()
+    bool isInLast2MonthsPeriod = HelperLib.isBarInLast_2_TradingMonths()
+    bool isInLast1YearPeriod   = HelperLib.isBarInLast_1_TradingYear()
+    bool isInLast2YearsPeriod  = HelperLib.isBarInLast_2_TradingYears()
+
+    // True ONLY on the single opening bar of recent sessions/weeks; MaxSize = 2 keeps strictly the latest 2 NDOGs & 2 NWOGs
+    bool isOpeningGapBar = ( canRequestData and session.isfirstbar and ( isCurrentWeekOpenSession ? isInLast4WeeksPeriod : isInLast5DaysPeriod ) )
+
+    if ( canRequestData and ( highestMonitoredTimeFrame > 0 ) )
+        bool barInScope = switch
+            ( highestMonitoredTimeFrame <= 900 )     => isInCurrentDayPeriod
+            ( highestMonitoredTimeFrame <= 5400 )    => isInLast2DaysPeriod
+            ( highestMonitoredTimeFrame <= 14400 )   => isInLast2WeeksPeriod
+            ( highestMonitoredTimeFrame <= 21600 )   => isInLastMonthPeriod
+            ( highestMonitoredTimeFrame <= 604800 )  => isInLast2MonthsPeriod
+            ( highestMonitoredTimeFrame <= 2628003 ) => isInLast1YearPeriod
+            =>                                          isInLast2YearsPeriod
+        canRequestData := ( canRequestData and ( barInScope or isOpeningGapBar ) )
+
+    varip bool isTrueLive = false
+    if ( barstate.isrealtime and ( timenow <= time_close ) )
+        isTrueLive := true
+
+    bool isBarReplay                   = ( barstate.isrealtime and not( isTrueLive ) )
+    bool canRegisterCurrentSecurityBar = ( barstate.isconfirmed and ( not( barstate.isrealtime ) or isBarReplay ) )
+
+    for [monitoredTimeFrame, monitoredTimeFrameInSeconds] in this.Settings.MonitoredTimeFramesMap
+        if ( not( canRequestData ) )
+            break
+
+        bool monitoringSameTimeFrame = ( CURRENT_TIMEFRAME_IN_SECONDS == monitoredTimeFrameInSeconds )
+
+        bool tfInScope = switch
+            ( monitoredTimeFrameInSeconds <= 900 )     => isInCurrentDayPeriod
+            ( monitoredTimeFrameInSeconds <= 5400 )    => isInLast2DaysPeriod
+            ( monitoredTimeFrameInSeconds <= 14400 )   => isInLast2WeeksPeriod
+            ( monitoredTimeFrameInSeconds <= 21600 )   => isInLastMonthPeriod
+            ( monitoredTimeFrameInSeconds <= 604800 )  => isInLast2MonthsPeriod
+            ( monitoredTimeFrameInSeconds <= 2628003 ) => isInLast1YearPeriod
+            =>                                            isInLast2YearsPeriod
+
+        bool runForOpeningGapOnly = ( not( tfInScope ) and monitoringSameTimeFrame and isOpeningGapBar )
+
+        if ( not( tfInScope ) and not( runForOpeningGapOnly ) )
+            continue
+
+        bool shouldCheckPrevSecurityBar = ( tfInScope and ( barstate.isrealtime or not( monitoringSameTimeFrame ) or ( barstate.islast and not( barstate.isconfirmed ) ) ) )
+        RuntimeSnapshot tfSnapshot      = this.getRuntimeSnapshot(monitoredTimeFrameInSeconds)
+
+        int htfOpenTime  = monitoringSameTimeFrame ? time       : time(monitoredTimeFrame, bars_back = 0)
+        int htfCloseTime = monitoringSameTimeFrame ? time_close : time_close(monitoredTimeFrame, bars_back = 0)
+
+        if ( this.Assets.isSecondAssetEnabled() )
+            [bi, o, h, l, c, ot, ct, sfb, prevO, prevH, prevL, prevC, prevOt, prevCt, prevBi, prevSfb] = request.security(
+                this.Assets.SecondTicker,
+                monitoredTimeFrame,
+                [bar_index, open, high, low, close, time, time_close, session.isfirstbar, open[1], high[1], low[1], close[1], time[1], time_close[1], bar_index[1], session.isfirstbar[1]],
+                ignore_invalid_symbol = true,
+                gaps                  = barmerge.gaps_off,
+                lookahead             = barmerge.lookahead_off
+            )
+
+            if ( shouldCheckPrevSecurityBar and not( na(prevOt) or na(prevO) ) and ( prevOt > tfSnapshot.SecondHolder.getLastRegisteredOpenTime() ) )
+                CandleLib.Candle prevCandle = CandleLib.Candle.new()
+                prevCandle.setBarIndex(prevBi)
+                prevCandle.setOpenCloseTime(prevOt, prevCt)
+                prevCandle.setPrices(prevO, prevH, prevL, prevC)
+                prevCandle.setSessionInfo(( prevSfb == true ), false)
+                this.registerCandle(this.Assets.SecondAssetId, monitoredTimeFrameInSeconds, prevCandle)
+
+            if ( monitoringSameTimeFrame and not( na(ot) or na(o) ) and ( ot == time ) )
+                this.LiveCandles.SecondAssetCandle.setOpenCloseTime(ot, ct)
+                this.LiveCandles.SecondAssetCandle.setPrices(o, h, l, c)
+                this.LiveCandles.SecondAssetCandle.setBarIndex(bi)
+                this.LiveCandles.SecondAssetCandle.setSessionInfo(( sfb == true ), false)
+
+                if ( sfb == true )
+                    this.registerSessionOpeningGap(sessionGapType, this.Assets.SecondAssetId, prevC, bi, ot, o)
+
+                if ( tfInScope and canRegisterCurrentSecurityBar )
+                    this.registerCandle(this.Assets.SecondAssetId, monitoredTimeFrameInSeconds, this.LiveCandles.SecondAssetCandle.copy())
+            else if ( not( monitoringSameTimeFrame ) and tfInScope and canRegisterCurrentSecurityBar and not( na(ot) or na(o) ) )
+                bool isHtfConfirmed = ( ( not( na(htfOpenTime) ) and ( ot < htfOpenTime ) ) or ( not( na(ct) ) and ( time_close >= ct ) ) )
+                if ( isHtfConfirmed )
+                    CandleLib.Candle closedHtfSec = CandleLib.Candle.new()
+                    closedHtfSec.setBarIndex(bi)
+                    closedHtfSec.setOpenCloseTime(ot, ct)
+                    closedHtfSec.setPrices(o, h, l, c)
+                    closedHtfSec.setSessionInfo(( sfb == true ), false)
+                    this.registerCandle(this.Assets.SecondAssetId, monitoredTimeFrameInSeconds, closedHtfSec)
+
+        if ( this.Assets.isThirdAssetEnabled() )
+            [bi, o, h, l, c, ot, ct, sfb, prevO, prevH, prevL, prevC, prevOt, prevCt, prevBi, prevSfb] = request.security(
+                this.Assets.ThirdTicker,
+                monitoredTimeFrame,
+                [bar_index, open, high, low, close, time, time_close, session.isfirstbar, open[1], high[1], low[1], close[1], time[1], time_close[1], bar_index[1], session.isfirstbar[1]],
+                ignore_invalid_symbol = true,
+                gaps                  = barmerge.gaps_off,
+                lookahead             = barmerge.lookahead_off
+            )
+
+            if ( shouldCheckPrevSecurityBar and not( na(prevOt) or na(prevO) ) and ( prevOt > tfSnapshot.ThirdHolder.getLastRegisteredOpenTime() ) )
+                CandleLib.Candle prevCandle = CandleLib.Candle.new()
+                prevCandle.setBarIndex(prevBi)
+                prevCandle.setOpenCloseTime(prevOt, prevCt)
+                prevCandle.setPrices(prevO, prevH, prevL, prevC)
+                prevCandle.setSessionInfo(( prevSfb == true ), false)
+                this.registerCandle(this.Assets.ThirdAssetId, monitoredTimeFrameInSeconds, prevCandle)
+
+            if ( monitoringSameTimeFrame and not( na(ot) or na(o) ) and ( ot == time ) )
+                this.LiveCandles.ThirdAssetCandle.setOpenCloseTime(ot, ct)
+                this.LiveCandles.ThirdAssetCandle.setPrices(o, h, l, c)
+                this.LiveCandles.ThirdAssetCandle.setBarIndex(bi)
+                this.LiveCandles.ThirdAssetCandle.setSessionInfo(( sfb == true ), false)
+
+                if ( sfb == true )
+                    this.registerSessionOpeningGap(sessionGapType, this.Assets.ThirdAssetId, prevC, bi, ot, o)
+
+                if ( tfInScope and canRegisterCurrentSecurityBar )
+                    this.registerCandle(this.Assets.ThirdAssetId, monitoredTimeFrameInSeconds, this.LiveCandles.ThirdAssetCandle.copy())
+            else if ( not( monitoringSameTimeFrame ) and tfInScope and canRegisterCurrentSecurityBar and not( na(ot) or na(o) ) )
+                bool isHtfConfirmed = ( ( not( na(htfOpenTime) ) and ( ot < htfOpenTime ) ) or ( not( na(ct) ) and ( time_close >= ct ) ) )
+                if ( isHtfConfirmed )
+                    CandleLib.Candle closedHtfTrd = CandleLib.Candle.new()
+                    closedHtfTrd.setBarIndex(bi)
+                    closedHtfTrd.setOpenCloseTime(ot, ct)
+                    closedHtfTrd.setPrices(o, h, l, c)
+                    closedHtfTrd.setSessionInfo(( sfb == true ), false)
+                    this.registerCandle(this.Assets.ThirdAssetId, monitoredTimeFrameInSeconds, closedHtfTrd)
+
+        if ( monitoringSameTimeFrame )
+            if ( session.isfirstbar )
+                this.registerSessionOpeningGap(sessionGapType, this.Assets.MainAssetId, mainPrevClose, bar_index, time, open)
+
+            if ( tfInScope and barstate.isconfirmed )
+                this.registerCandle(this.Assets.MainAssetId, monitoredTimeFrameInSeconds, this.LiveCandles.MainAssetCandle.copy())
+            continue
+
+        if ( barstate.isconfirmed )
+            if ( not( na(htfOpenTime) ) )
+                int  prevHtfOpenTime = lastHtfOpenTimeMap.get(monitoredTimeFrameInSeconds)
+                bool isNewHtfPeriod  = ( not( na(prevHtfOpenTime) ) and ( htfOpenTime != prevHtfOpenTime ) )
+                lastHtfOpenTimeMap.put(monitoredTimeFrameInSeconds, htfOpenTime)
+
+                CandleLib.Candle htfCandle = tempCandlesHolderMain.get(monitoredTimeFrameInSeconds)
+
+                if ( not( na(htfCandle) ) and ( htfCandle.OpenTime != htfOpenTime ) )
+                    this.registerCandle(this.Assets.MainAssetId, monitoredTimeFrameInSeconds, htfCandle)
+                    tempCandlesHolderMain.remove(monitoredTimeFrameInSeconds)
+                    htfCandle := na
+
+                if ( na(htfCandle) )
+                    if ( isNewHtfPeriod or ( time == htfOpenTime ) )
+                        htfCandle := this.LiveCandles.MainAssetCandle.copy()
+                        htfCandle.setOpenCloseTime(htfOpenTime, htfCloseTime)
+                        tempCandlesHolderMain.put(monitoredTimeFrameInSeconds, htfCandle)
+                else
+                    htfCandle.mergeWithLtfCandle(this.LiveCandles.MainAssetCandle)
+
+                if ( not( na(htfCandle) ) and not( na(htfCloseTime) ) and ( time_close >= htfCloseTime ) )
+                    this.registerCandle(this.Assets.MainAssetId, monitoredTimeFrameInSeconds, htfCandle)
+                    tempCandlesHolderMain.remove(monitoredTimeFrameInSeconds)
+
+    canRequestData
+
+
+//====================================================================
+// SMT LIVE TRACKING, TOP-N SELECTOR & DRAWING SYNCHRONIZATION
+//====================================================================
+
+getCorrelatedAssetShortName(Engine this, int corrAssetId) =>
+    bool hasPaired = not( na(this.Assets.PairedAssets) )
+    string nameStr = switch corrAssetId
+        AssetLib.SECOND_ASSET_ID => ( hasPaired and not( na(this.Assets.PairedAssets.SecondAssetSymbolRoot) ) ) ? this.Assets.PairedAssets.SecondAssetSymbolRoot : ( na(this.Assets.SecondTicker) ? "A2" : this.Assets.SecondTicker )
+        AssetLib.THIRD_ASSET_ID  => ( hasPaired and not( na(this.Assets.PairedAssets.ThirdAssetSymbolRoot) ) )  ? this.Assets.PairedAssets.ThirdAssetSymbolRoot  : ( na(this.Assets.ThirdTicker)  ? "A3" : this.Assets.ThirdTicker )
+        =>                          ""
+    nameStr
+
+
+export method updateLiveSmtEndpoints(Engine this) =>
+    if ( this.Assets.IsMainAssetPaired and not( barstate.isconfirmed ) )
+        CandleLib.Candle liveMain   = this.LiveCandles.MainAssetCandle
+        CandleLib.Candle liveSecond = this.LiveCandles.SecondAssetCandle
+        CandleLib.Candle liveThird  = this.LiveCandles.ThirdAssetCandle
+
+        if ( liveMain.OpenTime > 0 )
+            this.invalidateSmtByAssetCandle(AssetLib.MAIN_ASSET_ID, CURRENT_TIMEFRAME_IN_SECONDS, liveMain)
+
+        bool secondLiveSync = ( this.Assets.isSecondAssetEnabled() and ( liveSecond.OpenTime == liveMain.OpenTime ) and ( liveMain.OpenTime > 0 ) )
+        bool thirdLiveSync  = ( this.Assets.isThirdAssetEnabled()  and ( liveThird.OpenTime  == liveMain.OpenTime ) and ( liveMain.OpenTime > 0 ) )
+
+        if ( secondLiveSync or thirdLiveSync )
+            CandleLib.Candle otherForSecLive = thirdLiveSync  ? liveThird  : na
+            CandleLib.Candle otherForTrdLive = secondLiveSync ? liveSecond : na
+
+            for [_, tfSec] in this.Settings.SmtMonitoredTimeFrames
+                RuntimeSnapshot snapshot = this.getRuntimeSnapshot(tfSec)
+                int tfLastCloseTime      = na(snapshot.MainAssetCandle) ? 0 : snapshot.MainAssetCandle.CloseTime
+
+                if ( secondLiveSync )
+                    [secBullHolder, secBearHolder] = snapshot.getSmtHoldersForAsset(AssetLib.SECOND_ASSET_ID)
+                    [secSwingHigh, secSwingLow]    = snapshot.getSwingHoldersForAsset(AssetLib.SECOND_ASSET_ID)
+
+                    for cand in secBullHolder.getRegisteredSmtCandidates()
+                        bool wasActive = cand.isActive()
+                        if ( not( evalSmtCandidateOnCandle(cand, liveMain, liveSecond, otherForSecLive, false, tfLastCloseTime, snapshot.MainSwingLowHolder, secSwingLow) ) )
+                            secBullHolder.removeSmtCandidate(cand.OpenTime)
+                        else if ( not( wasActive ) and cand.isActive() and cand.isSequential() )
+                            pruneOlderSequentialSmts(snapshot, secBullHolder, cand.OpenTime)
+
+                    for cand in secBearHolder.getRegisteredSmtCandidates()
+                        bool wasActive = cand.isActive()
+                        if ( not( evalSmtCandidateOnCandle(cand, liveMain, liveSecond, otherForSecLive, false, tfLastCloseTime, snapshot.MainSwingHighHolder, secSwingHigh) ) )
+                            secBearHolder.removeSmtCandidate(cand.OpenTime)
+                        else if ( not( wasActive ) and cand.isActive() and cand.isSequential() )
+                            pruneOlderSequentialSmts(snapshot, secBearHolder, cand.OpenTime)
+
+                if ( thirdLiveSync )
+                    [trdBullHolder, trdBearHolder] = snapshot.getSmtHoldersForAsset(AssetLib.THIRD_ASSET_ID)
+                    [trdSwingHigh, trdSwingLow]    = snapshot.getSwingHoldersForAsset(AssetLib.THIRD_ASSET_ID)
+
+                    for cand in trdBullHolder.getRegisteredSmtCandidates()
+                        bool wasActive = cand.isActive()
+                        if ( not( evalSmtCandidateOnCandle(cand, liveMain, liveThird, otherForTrdLive, false, tfLastCloseTime, snapshot.MainSwingLowHolder, trdSwingLow) ) )
+                            trdBullHolder.removeSmtCandidate(cand.OpenTime)
+                        else if ( not( wasActive ) and cand.isActive() and cand.isSequential() )
+                            pruneOlderSequentialSmts(snapshot, trdBullHolder, cand.OpenTime)
+
+                    for cand in trdBearHolder.getRegisteredSmtCandidates()
+                        bool wasActive = cand.isActive()
+                        if ( not( evalSmtCandidateOnCandle(cand, liveMain, liveThird, otherForTrdLive, false, tfLastCloseTime, snapshot.MainSwingHighHolder, trdSwingHigh) ) )
+                            trdBearHolder.removeSmtCandidate(cand.OpenTime)
+                        else if ( not( wasActive ) and cand.isActive() and cand.isSequential() )
+                            pruneOlderSequentialSmts(snapshot, trdBearHolder, cand.OpenTime)
+
+
+getLiveChartBarPspPolarity(Engine this) =>
+    int polarity = 0
+    if ( this.Assets.IsMainAssetPaired and this.Settings.PreviewLivePsp and not( barstate.isconfirmed ) )
+        CandleLib.Candle liveMain   = this.LiveCandles.MainAssetCandle
+        CandleLib.Candle liveSecond = this.LiveCandles.SecondAssetCandle
+        CandleLib.Candle liveThird  = this.LiveCandles.ThirdAssetCandle
+
+        bool secondEnabled = this.Assets.isSecondAssetEnabled()
+        bool thirdEnabled  = this.Assets.isThirdAssetEnabled()
+        bool syncedLive    = ( ( liveMain.OpenTime == time ) and ( not( secondEnabled ) or ( liveSecond.OpenTime == time ) ) and ( not( thirdEnabled ) or ( liveThird.OpenTime == time ) ) )
+
+        if ( syncedLive )
+            bool allBull = ( liveMain.isBullish() and ( not( secondEnabled ) or liveSecond.isBullish() ) and ( not( thirdEnabled ) or liveThird.isBullish() ) )
+            bool allBear = ( liveMain.isBearish() and ( not( secondEnabled ) or liveSecond.isBearish() ) and ( not( thirdEnabled ) or liveThird.isBearish() ) )
+            if ( not( allBull or allBear ) )
+                polarity := liveMain.isBullish() ? 1 : -1
+    polarity
+
+
+getSegmentPriceAtBar(SmtLib.SmtDisplayItem item, int targetBarIndex) =>
+    int span = ( item.EndBarIndex - item.StartBarIndex )
+    ( span > 0 ) ? ( item.MainStartPrice + ( ( ( item.MainEndPrice - item.MainStartPrice ) * float(targetBarIndex - item.StartBarIndex) ) / float(span) ) ) : item.MainStartPrice
+
+
+areSegmentsCrossingInX(SmtLib.SmtDisplayItem a, SmtLib.SmtDisplayItem b) =>
+    int  xLeft   = math.max(a.StartBarIndex, b.StartBarIndex)
+    int  xRight  = math.min(a.EndBarIndex,   b.EndBarIndex)
+    bool crosses = false
+    if ( xLeft < xRight )
+        float diffLeft  = ( getSegmentPriceAtBar(a, xLeft)  - getSegmentPriceAtBar(b, xLeft) )
+        float diffRight = ( getSegmentPriceAtBar(a, xRight) - getSegmentPriceAtBar(b, xRight) )
+        crosses        := ( ( diffLeft * diffRight ) < 0.0 )
+    crosses
+
+
+export method getTopActiveSmts(Engine this, SmtLib.SmtDirection direction) =>
+    array<SmtLib.SmtDisplayItem> selected = array.new<SmtLib.SmtDisplayItem>()
+    int maxCount = direction.isBearish() ? this.Settings.MaxBearishSmts : this.Settings.MaxBullishSmts
+
+    if ( this.Assets.IsMainAssetPaired and ( maxCount > 0 ) )
+        map<int, SmtLib.SmtDisplayItem> mergedByLevel = map.new<int, SmtLib.SmtDisplayItem>()
+
+        bool   isBearDir     = direction.isBearish()
+        bool   secondEnabled = this.Assets.isSecondAssetEnabled()
+        bool   thirdEnabled  = this.Assets.isThirdAssetEnabled()
+        string secondName    = secondEnabled ? getCorrelatedAssetShortName(this, AssetLib.SECOND_ASSET_ID) : ""
+        string thirdName     = thirdEnabled  ? getCorrelatedAssetShortName(this, AssetLib.THIRD_ASSET_ID)  : ""
+
+        // Stage 1: Collect active SMTs across `SmtMonitoredTimeFrames` & merge Second + Third asset pairs ONLY when `(StartBarIndex, EndBarIndex)` match
+        int tfSlot = 0
+        for [_, tfSec] in this.Settings.SmtMonitoredTimeFrames
+            RuntimeSnapshot snapshot = this.getRuntimeSnapshot(tfSec)
+
+            for corrId in this.Assets.CorrelatedAssetsIds
+                SmtLib.SmtCandidatesHolder smtHolder = snapshot.getSmtHolderForAsset(corrId, direction)
+                if ( na(smtHolder) )
+                    continue
+
+                for cand in smtHolder.getRegisteredSmtCandidates()
+                    if ( not( cand.isActive() ) or ( ( last_bar_index - cand.StartBarIndex ) > MAX_BARS_BACK_SAFE ) )
+                        continue
+
+                    int   endBarIndex = cand.EndBarIndex
+                    float endPrice    = cand.MainEndPrice
+                    if ( endBarIndex == bar_index )
+                        endPrice := isBearDir ? math.max(high, endPrice) : math.min(low, endPrice)
+
+                    int mergeKey   = HelperLib.getCompositeIntKey(cand.IntType, tfSlot, ( cand.StartBarIndex * 2000000 ) + endBarIndex)
+                    int displayKey = HelperLib.getCompositeIntKey(cand.IntType, tfSlot, cand.StartBarIndex)
+                    SmtLib.SmtDisplayItem existing = mergedByLevel.get(mergeKey)
+
+                    if ( na(existing) )
+                        SmtLib.SmtDisplayItem item = SmtLib.SmtDisplayItem.new(
+                            DisplayKey         = displayKey,
+                            IntDirection       = cand.IntDirection,
+                            IntType            = cand.IntType,
+                            TimeFrameInSeconds = tfSec,
+                            StartBarIndex      = cand.StartBarIndex,
+                            MainStartPrice     = cand.MainStartPrice,
+                            EndBarIndex        = endBarIndex,
+                            MainEndPrice       = endPrice,
+                            HasSecondAsset     = ( corrId == AssetLib.SECOND_ASSET_ID ),
+                            HasThirdAsset      = ( corrId == AssetLib.THIRD_ASSET_ID ),
+                            IsConfirmed        = cand.IsConfirmed
+                        )
+                        mergedByLevel.put(mergeKey, item)
+                        true
+                    else
+                        if ( corrId == AssetLib.SECOND_ASSET_ID )
+                            existing.HasSecondAsset := true
+                        if ( corrId == AssetLib.THIRD_ASSET_ID )
+                            existing.HasThirdAsset  := true
+
+                        existing.IsConfirmed := ( existing.IsConfirmed or cand.IsConfirmed )
+
+                        bool isMoreExtreme = isBearDir ? ( endPrice > existing.MainEndPrice ) : ( endPrice < existing.MainEndPrice )
+                        if ( isMoreExtreme )
+                            existing.MainEndPrice := endPrice
+                        true
+
+            tfSlot += 1
+
+        // Stage 2a: Left-anchor filtering first — max 1 SMT per `StartBarIndex` across all timeframes (eliminates left-wick V-fans & prevents lower-TF duplicate anchors from zombie-killing tip reversals)
+        map<int, SmtLib.SmtDisplayItem> dedupedByStart = map.new<int, SmtLib.SmtDisplayItem>()
+        for [_, item] in mergedByLevel
+            int startKey = item.StartBarIndex
+            SmtLib.SmtDisplayItem prevStart = dedupedByStart.get(startKey)
+
+            bool takeStart = na(prevStart)
+            if ( not( takeStart ) )
+                if ( item.TimeFrameInSeconds != prevStart.TimeFrameInSeconds )
+                    takeStart := ( item.TimeFrameInSeconds > prevStart.TimeFrameInSeconds )
+                else if ( item.IsConfirmed != prevStart.IsConfirmed )
+                    takeStart := item.IsConfirmed
+                else if ( item.IntType != prevStart.IntType )
+                    takeStart := ( item.IntType < prevStart.IntType )
+                else if ( item.EndBarIndex != prevStart.EndBarIndex )
+                    takeStart := ( item.EndBarIndex > prevStart.EndBarIndex )
+                else
+                    bool itemIsTriad = ( item.HasSecondAsset and item.HasThirdAsset )
+                    bool prevIsTriad = ( prevStart.HasSecondAsset and prevStart.HasThirdAsset )
+                    takeStart := ( itemIsTriad and not( prevIsTriad ) )
+
+            if ( takeStart )
+                dedupedByStart.put(startKey, item)
+
+        // Stage 2b: Endpoint filtering + strict `AND` nested tip reversal (`( itemSpan < htfBarSpan ) and ( ( itemSpan * 4 ) <= winnerSpan )`)
+        array<SmtLib.SmtDisplayItem> startPool = dedupedByStart.values()
+        map<int, SmtLib.SmtDisplayItem> dedupedByEndpoint = map.new<int, SmtLib.SmtDisplayItem>()
+        for item in startPool
+            int endpointKey = item.EndBarIndex
+            SmtLib.SmtDisplayItem prevItem = dedupedByEndpoint.get(endpointKey)
+
+            bool takeItem = na(prevItem)
+            if ( not( takeItem ) )
+                if ( item.TimeFrameInSeconds != prevItem.TimeFrameInSeconds )
+                    takeItem := ( item.TimeFrameInSeconds > prevItem.TimeFrameInSeconds )
+                else if ( item.IsConfirmed != prevItem.IsConfirmed )
+                    takeItem := item.IsConfirmed
+                else if ( item.IntType != prevItem.IntType )
+                    takeItem := ( item.IntType < prevItem.IntType )
+                else if ( item.StartBarIndex != prevItem.StartBarIndex )
+                    takeItem := ( item.StartBarIndex < prevItem.StartBarIndex )
+                else
+                    bool itemIsTriad = ( item.HasSecondAsset and item.HasThirdAsset )
+                    bool prevIsTriad = ( prevItem.HasSecondAsset and prevItem.HasThirdAsset )
+                    takeItem := ( itemIsTriad and not( prevIsTriad ) )
+
+            if ( takeItem )
+                dedupedByEndpoint.put(endpointKey, item)
+
+        map<int, SmtLib.SmtDisplayItem> subCandleByEndpoint = map.new<int, SmtLib.SmtDisplayItem>()
+        for item in startPool
+            int endpointKey = item.EndBarIndex
+            SmtLib.SmtDisplayItem winner = dedupedByEndpoint.get(endpointKey)
+
+            if ( not( na(winner) ) and ( item.TimeFrameInSeconds < winner.TimeFrameInSeconds ) )
+                int itemSpan   = ( item.EndBarIndex - item.StartBarIndex )
+                int winnerSpan = ( winner.EndBarIndex - winner.StartBarIndex )
+                int htfBarSpan = int(winner.TimeFrameInSeconds / CURRENT_TIMEFRAME_IN_SECONDS)
+                if ( ( item.StartBarIndex > winner.StartBarIndex ) and ( itemSpan < htfBarSpan ) and ( ( itemSpan * 4 ) <= winnerSpan ) )
+                    SmtLib.SmtDisplayItem prevSub = subCandleByEndpoint.get(endpointKey)
+                    bool takeSub = na(prevSub)
+                    if ( not( takeSub ) )
+                        if ( item.TimeFrameInSeconds != prevSub.TimeFrameInSeconds )
+                            takeSub := ( item.TimeFrameInSeconds > prevSub.TimeFrameInSeconds )
+                        else if ( item.IsConfirmed != prevSub.IsConfirmed )
+                            takeSub := item.IsConfirmed
+                        else if ( item.IntType != prevSub.IntType )
+                            takeSub := ( item.IntType < prevSub.IntType )
+                        else if ( item.StartBarIndex != prevSub.StartBarIndex )
+                            takeSub := ( item.StartBarIndex < prevSub.StartBarIndex )
+                        else
+                            bool itemIsTriad = ( item.HasSecondAsset and item.HasThirdAsset )
+                            bool prevIsTriad = ( prevSub.HasSecondAsset and prevSub.HasThirdAsset )
+                            takeSub := ( itemIsTriad and not( prevIsTriad ) )
+
+                    if ( takeSub )
+                        subCandleByEndpoint.put(endpointKey, item)
+
+        array<SmtLib.SmtDisplayItem> anchorPool = dedupedByEndpoint.values()
+        for [_, subItem] in subCandleByEndpoint
+            anchorPool.push(subItem)
+
+        // Stage 2c: Span enclosure — drop an inner SMT when a same-or-higher-TF outer SMT (confirmed or unconfirmed) wraps `[StartBarIndex .. EndBarIndex]`, except qualified nested tip reversals
+        array<SmtLib.SmtDisplayItem> candidates = array.new<SmtLib.SmtDisplayItem>()
+        for item in anchorPool
+            bool engulfedByOuter = false
+            int  itemSpan        = ( item.EndBarIndex - item.StartBarIndex )
+            for outer in anchorPool
+                if ( ( outer.DisplayKey != item.DisplayKey ) and ( outer.TimeFrameInSeconds >= item.TimeFrameInSeconds ) )
+                    bool coversSpan  = ( ( outer.StartBarIndex <= item.StartBarIndex ) and ( outer.EndBarIndex >= item.EndBarIndex ) )
+                    bool isWider     = ( ( outer.StartBarIndex < item.StartBarIndex )  or  ( outer.EndBarIndex > item.EndBarIndex ) )
+                    if ( coversSpan and isWider )
+                        int  outerSpan    = ( outer.EndBarIndex - outer.StartBarIndex )
+                        int  outerBarSpan = int(outer.TimeFrameInSeconds / CURRENT_TIMEFRAME_IN_SECONDS)
+                        bool isNestedTip  = ( ( outer.TimeFrameInSeconds > item.TimeFrameInSeconds ) and ( item.EndBarIndex == outer.EndBarIndex ) and ( itemSpan < outerBarSpan ) and ( ( itemSpan * 4 ) <= outerSpan ) )
+                        if ( not( isNestedTip ) )
+                            engulfedByOuter := true
+                            break
+            if ( not( engulfedByOuter ) )
+                candidates.push(item)
+
+        // Stage 3: Pick last `maxCount` non-crossing items strictly right-to-left (most recent `EndBarIndex` first -> Highest TF -> `StartBarIndex`)
+        while ( ( selected.size() < maxCount ) and ( candidates.size() > 0 ) )
+            int                   bestIdx  = -1
+            SmtLib.SmtDisplayItem bestItem = na
+
+            for i = 0 to ( candidates.size() - 1 )
+                SmtLib.SmtDisplayItem c = candidates.get(i)
+                bool isNewer = na(bestItem)
+                if ( not( isNewer ) )
+                    if ( c.EndBarIndex != bestItem.EndBarIndex )
+                        isNewer := ( c.EndBarIndex > bestItem.EndBarIndex )
+                    else if ( c.TimeFrameInSeconds != bestItem.TimeFrameInSeconds )
+                        isNewer := ( c.TimeFrameInSeconds > bestItem.TimeFrameInSeconds )
+                    else
+                        isNewer := ( c.StartBarIndex > bestItem.StartBarIndex )
+
+                if ( isNewer )
+                    bestItem := c
+                    bestIdx  := i
+
+            if ( bestIdx < 0 )
+                break
+
+            SmtLib.SmtDisplayItem picked = candidates.remove(bestIdx)
+            bool crossesExisting = false
+            for sel in selected
+                if ( areSegmentsCrossingInX(picked, sel) )
+                    crossesExisting := true
+                    break
+
+            if ( not( crossesExisting ) )
+                selected.push(picked)
+
+        // Stage 4: Format labels & mark Start/End `◉` PSP dots (chart TF only, deduplicated across shared vertices)
+        int  livePspPol = getLiveChartBarPspPolarity(this)
+        bool liveIsPsp  = ( not( barstate.isconfirmed ) and ( livePspPol != 0 ) )
+
+        map<int, int> pspDotClaimedBars = map.new<int, int>()
+        for item in selected
+            bool hideSeqLabel = ( ( item.TimeFrameInSeconds == CURRENT_TIMEFRAME_IN_SECONDS ) and ( item.IntType == SmtLib.SmtType.Sequential.toIntType() ) )
+            if ( hideSeqLabel )
+                item.LabelText := na
+            else
+                string tfShort   = ( item.TimeFrameInSeconds == CURRENT_TIMEFRAME_IN_SECONDS ) ? '' : formatTimeFrameShortLabel(item.TimeFrameInSeconds)
+                string assetsTag = ( item.HasSecondAsset and item.HasThirdAsset ) ? ( secondName + "+" + thirdName ) : ( item.HasSecondAsset ? secondName : thirdName )
+                string typeTag   = switch SmtLib.typeFromInt(item.IntType)
+                    SmtLib.SmtType.GapFill    => "G "
+                    SmtLib.SmtType.Session    => "S "
+                    SmtLib.SmtType.Sequential => "SQ "
+                    =>                           ""
+                item.LabelText := str.trim(tfShort + " " + typeTag + assetsTag)
+
+            bool startPsp = ( item.StartBarIndex == bar_index ) ? liveIsPsp : this.ChartPspMap.contains(item.StartBarIndex)
+            bool endPsp   = ( item.EndBarIndex   == bar_index ) ? liveIsPsp : this.ChartPspMap.contains(item.EndBarIndex)
+
+            item.StartIsPSP := startPsp
+            item.EndIsPSP   := endPsp
+
+            if ( startPsp and not( pspDotClaimedBars.contains(item.StartBarIndex) ) )
+                pspDotClaimedBars.put(item.StartBarIndex, 1)
+                item.DrawStartPspDot := true
+
+            if ( endPsp and not( pspDotClaimedBars.contains(item.EndBarIndex) ) )
+                pspDotClaimedBars.put(item.EndBarIndex, 1)
+                item.DrawEndPspDot := true
+
+    selected
+
+
+export method synchronizeSmtDrawings(Engine this, SmtLib.Settings bullishSettings, SmtLib.Settings bearishSettings) =>
+    int maxBull = this.Settings.MaxBullishSmts
+    int maxBear = this.Settings.MaxBearishSmts
+
+    if ( this.Assets.IsMainAssetPaired and ( ( maxBull > 0 ) or ( maxBear > 0 ) ) and ( barstate.islast or barstate.isconfirmed ) )
+        this.updateLiveSmtEndpoints()
+
+    if ( this.Assets.IsMainAssetPaired and barstate.islast )
+        this.ActiveDisplayEndBarsMap.clear()
+
+        SmtLib.DrawingsHolder bullDrawHolder = this.getSmtDrawingsHolder(SmtLib.SmtDirection.Bullish)
+        SmtLib.DrawingsHolder bearDrawHolder = this.getSmtDrawingsHolder(SmtLib.SmtDirection.Bearish)
+
+        bullDrawHolder.setMaxSize(maxBull)
+        bearDrawHolder.setMaxSize(maxBear)
+
+        if ( maxBull > 0 )
+            array<SmtLib.SmtDisplayItem> topBull = this.getTopActiveSmts(SmtLib.SmtDirection.Bullish)
+            for item in topBull
+                this.ActiveDisplayEndBarsMap.put(item.StartBarIndex, 1)
+                this.ActiveDisplayEndBarsMap.put(item.EndBarIndex,   1)
+            bullDrawHolder.synchronizeDisplayItems(topBull, SmtLib.SmtDirection.Bullish, bullishSettings)
+
+        if ( maxBear > 0 )
+            array<SmtLib.SmtDisplayItem> topBear = this.getTopActiveSmts(SmtLib.SmtDirection.Bearish)
+            for item in topBear
+                this.ActiveDisplayEndBarsMap.put(item.StartBarIndex, 1)
+                this.ActiveDisplayEndBarsMap.put(item.EndBarIndex,   1)
+            bearDrawHolder.synchronizeDisplayItems(topBear, SmtLib.SmtDirection.Bearish, bearishSettings)
+
+
+export method getPspBarColor(Engine this, color bullishColor = #089981FF, color bearishColor = #F23645FF) =>
+    color barCol = na
+    if ( this.Assets.IsMainAssetPaired and ( bar_index > 0 ) and ( ( last_bar_index - bar_index ) <= 3 ) )
+        int targetBar = ( bar_index - 1 )
+        int pspPol    = this.ChartPspMap.get(targetBar)
+
+        if ( not( na(pspPol) ) )
+            bool isTopEndpoint = false
+            if ( barstate.islast )
+                isTopEndpoint := this.ActiveDisplayEndBarsMap.contains(targetBar)
+            else
+                if ( this.Settings.MaxBullishSmts > 0 )
+                    for item in this.getTopActiveSmts(SmtLib.SmtDirection.Bullish)
+                        if ( ( item.StartBarIndex == targetBar ) or ( item.EndBarIndex == targetBar ) )
+                            isTopEndpoint := true
+                            break
+                if ( not( isTopEndpoint ) and ( this.Settings.MaxBearishSmts > 0 ) )
+                    for item in this.getTopActiveSmts(SmtLib.SmtDirection.Bearish)
+                        if ( ( item.StartBarIndex == targetBar ) or ( item.EndBarIndex == targetBar ) )
+                            isTopEndpoint := true
+                            break
+
+            if ( isTopEndpoint )
+                barCol := ( pspPol > 0 ) ? bullishColor : bearishColor
+    barCol
+
+
+export method getCurrentBarPspColor(Engine this, color bullishColor = #089981FF, color bearishColor = #F23645FF) =>
+    color barCol = na
+    if ( this.Assets.IsMainAssetPaired and barstate.islast and this.ActiveDisplayEndBarsMap.contains(bar_index) )
+        int pspPol = barstate.isconfirmed ? nz(this.ChartPspMap.get(bar_index), 0) : getLiveChartBarPspPolarity(this)
+        if ( pspPol != 0 )
+            barCol := ( pspPol > 0 ) ? bullishColor : bearishColor
+    barCol

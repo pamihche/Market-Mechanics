@@ -1,0 +1,669 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+library("SwingLibrary", overlay = true)
+
+
+const int MAX_LINE_BARS_BACK = 4900
+
+
+//====================================================================
+// ENUMS
+//====================================================================
+
+export enum SwingType
+    SwingHigh = 'High'
+    SwingLow  = 'Low'
+
+
+export getAllSwingTypes() =>
+    var array<SwingType> _AllSwingTypes = array.from(SwingType.SwingHigh, SwingType.SwingLow)
+    _AllSwingTypes
+
+
+export method toIntType(SwingType this) =>
+    switch this
+        SwingType.SwingHigh => 0
+        SwingType.SwingLow  => 1
+        =>                     -1
+
+
+export typeFromInt(int intSwingType) =>
+    SwingType result = switch intSwingType
+        0 => SwingType.SwingHigh
+        1 => SwingType.SwingLow
+        =>   na
+    result
+
+
+//====================================================================
+// TYPES
+//====================================================================
+
+export type Swing
+    varip int   IntType          = -1
+
+    varip int   BarIndex         = 0
+
+    varip int   OpenTime         = 0
+    varip int   CloseTime        = 0
+
+    varip float OpenPrice        = 0
+    varip float HighPrice        = 0
+    varip float LowPrice         = 0
+    varip float ClosePrice       = 0
+
+    varip int   OpenBarIndex     = 0
+    varip int   HighBarIndex     = 0
+    varip int   LowBarIndex      = 0
+    varip int   CloseBarIndex    = 0
+
+    //varip bool  IsSwept          = false
+    varip int   SweptByBarIndex  = 0
+    varip int   SweptByOpenTime  = 0
+
+    //varip bool  IsBroken         = false
+    varip int   BrokenByBarIndex = 0
+    varip int   BrokenByOpenTime = 0
+
+    varip bool  IsPSP            = false
+
+
+export type SwingsHolder
+    varip map<int, Swing> MapSwings           = na
+    varip Swing           LastRegisteredSwing = na
+    varip array<Swing>    CachedValues        = na
+    varip bool            IsCacheInSync       = false
+    varip int             MaxSize             = 50
+
+
+export type SwingExtremesTracker
+    varip SwingsHolder HighExtremesHolder = na
+    varip SwingsHolder LowExtremesHolder  = na
+    varip array<Swing> PendingHighs       = na
+    varip array<Swing> PendingLows        = na
+
+
+export type DealingRange
+    varip Swing TopSwing    = na
+    varip Swing BottomSwing = na
+
+
+export type SwingsStorage
+    varip map<int, SwingsHolder>         MapHolders          = na
+    varip map<int, SwingExtremesTracker> MapExtremesTrackers = na
+
+
+//====================================================================
+// DEALING RANGE DRAWING TYPES
+//====================================================================
+
+export type DealingRangeSettings
+    color  TopColor             = #F23645FF
+    int    TopLineWidth         = 1
+    string TopLineStyle         = line.style_solid
+    string TopLabelText         = "BSL"
+    bool   ShowTopLabel         = true
+
+    color  BottomColor          = #089981FF
+    int    BottomLineWidth      = 1
+    string BottomLineStyle      = line.style_solid
+    string BottomLabelText      = "SSL"
+    bool   ShowBottomLabel      = true
+
+    color  EquilibriumColor     = #787B86CC
+    int    EquilibriumLineWidth = 1
+    string EquilibriumLineStyle = line.style_dashed
+    string EquilibriumLabelText = "EQ"
+    bool   ShowEquilibrium      = true
+    bool   ShowEquilibriumLabel = true
+
+
+export type DealingRangeDrawings
+    DealingRangeSettings Settings         = na
+
+    line                 TopLine          = na
+    label                TopLabel         = na
+    line                 BottomLine       = na
+    label                BottomLabel      = na
+    line                 EquilibriumLine  = na
+    label                EquilibriumLabel = na
+
+
+export type DealingRangeDrawingsStorage
+    map<int, DealingRangeDrawings> MapDrawings = na
+
+
+//====================================================================
+// Swing METHODS
+//====================================================================
+
+export method setPrices(Swing this, float openPrice = open, float highPrice = high, float lowPrice = low, float closePrice = close) =>
+    this.OpenPrice  := nz(openPrice)
+    this.HighPrice  := nz(highPrice)
+    this.LowPrice   := nz(lowPrice)
+    this.ClosePrice := nz(closePrice)
+
+
+export method setBarIndex(Swing this, int barIndex = bar_index, bool syncSubIndices = true) =>
+    int bi = nz(barIndex)
+    this.BarIndex := bi
+    if ( syncSubIndices )
+        this.OpenBarIndex  := bi
+        this.HighBarIndex  := bi
+        this.LowBarIndex   := bi
+        this.CloseBarIndex := bi
+
+
+export method setOpenCloseTime(Swing this, int openTime = time, int closeTime = time_close) =>
+    this.OpenTime  := nz(openTime)
+    this.CloseTime := nz(closeTime)
+
+
+export method setType(Swing this, SwingType swingType) =>
+    this.IntType := swingType.toIntType()
+
+
+export method isSwingHigh(Swing this) =>
+    (this.IntType == 0)
+
+
+export method isSwingLow(Swing this) =>
+    (this.IntType == 1)
+
+
+export method getPrice(Swing this) =>
+    this.isSwingHigh() ? this.HighPrice : (this.isSwingLow() ? this.LowPrice : 0)
+
+
+export method getExtremeBarIndex(Swing this) =>
+    this.isSwingHigh() ? this.HighBarIndex : (this.isSwingLow() ? this.LowBarIndex : 0)
+
+
+export method isBearish(Swing this) =>
+    (this.OpenPrice > this.ClosePrice)
+
+
+export method isBullish(Swing this) =>
+    (this.OpenPrice < this.ClosePrice)
+
+
+export method isNeutral(Swing this) =>
+    (this.OpenPrice == this.ClosePrice)
+
+
+export method isDoji(Swing this) =>
+    (math.abs(this.ClosePrice - this.OpenPrice) <= ((this.HighPrice - this.LowPrice) * 0.1))
+
+
+
+export method IsSwept(Swing this) =>
+    ( ( this.SweptByBarIndex > 0 ) or ( this.SweptByOpenTime > 0 ) )
+
+
+export method IsBroken(Swing this) =>
+    ( ( this.BrokenByBarIndex > 0 ) or ( this.BrokenByOpenTime > 0 ) )
+
+
+export method isTaken(Swing this) =>
+    ( this.IsSwept() or this.IsBroken() )
+
+
+export method markSwept(Swing this, int atBarIndex = bar_index, int atOpenTime = time) =>
+    this.SweptByBarIndex := atBarIndex
+    this.SweptByOpenTime := atOpenTime
+
+
+export method markBroken(Swing this, int atBarIndex = bar_index, int atOpenTime = time) =>
+    this.BrokenByBarIndex := atBarIndex
+    this.BrokenByOpenTime := atOpenTime
+
+
+export method logPrices(Swing this) =>
+    log.info('O: ' + str.tostring(this.OpenPrice) + ' H: ' + str.tostring(this.HighPrice) + ' L: ' + str.tostring(this.LowPrice) + ' C: ' + str.tostring(this.ClosePrice))
+
+
+export method logOpenCloseTime(Swing this, string timezone = "America/New_York") =>
+    log.info('OT: ' + str.format_time(this.OpenTime, "yyyy-MM-dd HH:mm:ss", timezone) + ' CT: ' + str.format_time(this.CloseTime, "yyyy-MM-dd HH:mm:ss", timezone))
+
+
+//====================================================================
+// SwingsHolder METHODS
+//====================================================================
+
+export method clear(SwingsHolder this) =>
+    if ( this.MapSwings.size() > 0 )
+        this.MapSwings.clear()
+        this.CachedValues.clear()
+
+    if ( this.MaxSize < 0 )
+        this.MaxSize := 0
+
+    this.LastRegisteredSwing := na
+    this.IsCacheInSync       := true
+
+
+export method enforceMaxSize(SwingsHolder this) =>
+    if ( this.MaxSize > 0 )
+        int overflow = this.MapSwings.size() - this.MaxSize
+        if ( overflow > 0 )
+            if ( overflow == 1 )
+                for [mapKey, _] in this.MapSwings
+                    this.MapSwings.remove(mapKey)
+                    break
+            else
+                for [index, mapKey] in this.MapSwings.keys()
+                    this.MapSwings.remove(mapKey)
+                    if ( index == (overflow - 1) )
+                        break
+            this.IsCacheInSync := false
+    else
+        this.clear()
+
+
+export method setMaxSize(SwingsHolder this, int maxSize) =>
+    this.MaxSize := (maxSize > 0) ? maxSize : 0
+    this.enforceMaxSize()
+
+
+export method registerSwing(SwingsHolder this, int swingId, Swing swing) =>
+    Swing existingSwing = na
+    if ( (this.MaxSize > 0) and not( na(swing) ) )
+        this.LastRegisteredSwing := swing
+        existingSwing            := this.MapSwings.put(swingId, swing)
+        this.IsCacheInSync       := false
+        this.enforceMaxSize()
+    existingSwing
+
+
+export method getSwing(SwingsHolder this, int swingId) =>
+    this.MapSwings.get(swingId)
+
+
+export method hasRegisteredSwing(SwingsHolder this, int swingId) =>
+    this.MapSwings.contains(swingId)
+
+
+export method getRegisteredSwings(SwingsHolder this) =>
+    if ( not( this.IsCacheInSync ) )
+        this.CachedValues  := this.MapSwings.values()
+        this.IsCacheInSync := true
+    this.CachedValues
+
+
+export method removeSwing(SwingsHolder this, int swingId) =>
+    Swing removedSwing = this.MapSwings.remove(swingId)
+    if ( not( na(removedSwing) ) )
+        this.IsCacheInSync := false
+        if ( this.MapSwings.size() == 0 )
+            this.LastRegisteredSwing := na
+        else if ( removedSwing.OpenTime == this.LastRegisteredSwing.OpenTime )
+            this.LastRegisteredSwing := this.getRegisteredSwings().last()
+    removedSwing
+
+
+export method countSwings(SwingsHolder this) =>
+    this.MapSwings.size()
+
+
+export method getLastRegisteredSwing(SwingsHolder this) =>
+    this.LastRegisteredSwing
+
+
+export method getLastRegisteredOpenTime(SwingsHolder this) =>
+    na(this.LastRegisteredSwing) ? 0 : this.LastRegisteredSwing.OpenTime
+
+
+export method getLastUntakenSwing(SwingsHolder this) =>
+    array<Swing> registeredSwings = this.getRegisteredSwings()
+    int          swingsCount      = registeredSwings.size()
+    Swing        untakenSwing     = na
+
+    for i = 1 to ( ( swingsCount > 0 ) ? swingsCount : na )
+        Swing candidate = registeredSwings.get(-i)
+        if ( not( candidate.isTaken() ) )
+            untakenSwing := candidate
+            break
+    untakenSwing
+
+
+export method updateSwings(SwingsHolder this, int currentBarIndex, int currentOpenTime, float currentHighPrice, float currentLowPrice, float currentClosePrice, bool removeBroken = false) =>
+    array<Swing> registeredSwings = this.getRegisteredSwings()
+    int          swingsCount      = registeredSwings.size()
+
+    for i = 1 to ( ( swingsCount > 0 ) ? swingsCount : na )
+        Swing registeredSwing = registeredSwings.get(-i)
+        if ( currentOpenTime <= registeredSwing.OpenTime )
+            continue
+
+        switch
+            registeredSwing.isSwingHigh() =>
+                if ( not( registeredSwing.IsBroken() ) and ( currentClosePrice > registeredSwing.HighPrice ) )
+                    registeredSwing.markBroken(currentBarIndex, currentOpenTime)
+                else if ( not( registeredSwing.IsSwept() ) and ( currentHighPrice > registeredSwing.HighPrice ) )
+                    registeredSwing.markSwept(currentBarIndex, currentOpenTime)
+                true
+
+            registeredSwing.isSwingLow() =>
+                if ( not( registeredSwing.IsBroken() ) and ( currentClosePrice < registeredSwing.LowPrice ) )
+                    registeredSwing.markBroken(currentBarIndex, currentOpenTime)
+                else if ( not( registeredSwing.IsSwept() ) and ( currentLowPrice < registeredSwing.LowPrice ) )
+                    registeredSwing.markSwept(currentBarIndex, currentOpenTime)
+                true
+
+            => false
+
+        if ( removeBroken and registeredSwing.IsBroken() )
+            this.removeSwing(registeredSwing.OpenTime)
+            continue
+
+        if ( not( registeredSwing.isTaken() ) )
+            break
+
+
+//====================================================================
+// SwingExtremesTracker METHODS
+//====================================================================
+
+createSwingsHolderInstance(int maxSize = 50) =>
+    SwingsHolder swingsHolder = SwingsHolder.new(
+        MapSwings           = map.new<int, Swing>(),
+        LastRegisteredSwing = na,
+        CachedValues        = array.new<Swing>(),
+        IsCacheInSync       = true
+    )
+    swingsHolder.setMaxSize(maxSize)
+    swingsHolder
+
+
+export method clear(SwingExtremesTracker this) =>
+    this.HighExtremesHolder.clear()
+    this.LowExtremesHolder.clear()
+    this.PendingHighs.clear()
+    this.PendingLows.clear()
+
+
+method processSwingHigh(SwingExtremesTracker this, Swing newSwingHigh) =>
+    Swing lastHighExtreme = this.HighExtremesHolder.getLastRegisteredSwing()
+
+    if ( na(lastHighExtreme) )
+        this.HighExtremesHolder.registerSwing(newSwingHigh.OpenTime, newSwingHigh)
+        this.PendingHighs.clear()
+    else if ( newSwingHigh.HighPrice > lastHighExtreme.HighPrice )
+        for pendingLow in this.PendingLows
+            this.LowExtremesHolder.registerSwing(pendingLow.OpenTime, pendingLow)
+
+        this.PendingLows.clear()
+        this.PendingHighs.clear()
+
+        Swing lastLowExtreme   = this.LowExtremesHolder.getLastRegisteredSwing()
+        bool  noLowSincePrevHi = ( na(lastLowExtreme) or ( lastLowExtreme.OpenTime < lastHighExtreme.OpenTime ) )
+        if ( noLowSincePrevHi )
+            this.HighExtremesHolder.removeSwing(lastHighExtreme.OpenTime)
+
+        this.HighExtremesHolder.registerSwing(newSwingHigh.OpenTime, newSwingHigh)
+    else
+        while ( this.PendingHighs.size() > 0 )
+            if ( this.PendingHighs.last().HighPrice <= newSwingHigh.HighPrice )
+                this.PendingHighs.pop()
+            else
+                break
+        this.PendingHighs.push(newSwingHigh)
+
+    true
+
+
+method processSwingLow(SwingExtremesTracker this, Swing newSwingLow) =>
+    Swing lastLowExtreme = this.LowExtremesHolder.getLastRegisteredSwing()
+
+    if ( na(lastLowExtreme) )
+        this.LowExtremesHolder.registerSwing(newSwingLow.OpenTime, newSwingLow)
+        this.PendingLows.clear()
+    else if ( newSwingLow.LowPrice < lastLowExtreme.LowPrice )
+        for pendingHigh in this.PendingHighs
+            this.HighExtremesHolder.registerSwing(pendingHigh.OpenTime, pendingHigh)
+
+        this.PendingHighs.clear()
+        this.PendingLows.clear()
+
+        Swing lastHighExtreme   = this.HighExtremesHolder.getLastRegisteredSwing()
+        bool  noHighSincePrevLo = ( na(lastHighExtreme) or ( lastHighExtreme.OpenTime < lastLowExtreme.OpenTime ) )
+        if ( noHighSincePrevLo )
+            this.LowExtremesHolder.removeSwing(lastLowExtreme.OpenTime)
+
+        this.LowExtremesHolder.registerSwing(newSwingLow.OpenTime, newSwingLow)
+    else
+        while ( this.PendingLows.size() > 0 )
+            if ( this.PendingLows.last().LowPrice >= newSwingLow.LowPrice )
+                this.PendingLows.pop()
+            else
+                break
+        this.PendingLows.push(newSwingLow)
+
+    true
+
+
+export method processNewSwing(SwingExtremesTracker this, Swing newSwing) =>
+    if ( not( na(newSwing) ) )
+        if ( newSwing.isSwingHigh() )
+            this.processSwingHigh(newSwing)
+        else if ( newSwing.isSwingLow() )
+            this.processSwingLow(newSwing)
+
+
+export method updateExtremes(SwingExtremesTracker this, int currentBarIndex, int currentOpenTime, float currentHighPrice, float currentLowPrice, float currentClosePrice, bool removeBroken = false) =>
+    this.HighExtremesHolder.updateSwings(currentBarIndex, currentOpenTime, currentHighPrice, currentLowPrice, currentClosePrice, removeBroken)
+    this.LowExtremesHolder.updateSwings(currentBarIndex,  currentOpenTime, currentHighPrice, currentLowPrice, currentClosePrice, removeBroken)
+
+
+export method getDealingRange(SwingExtremesTracker this) =>
+    DealingRange.new(
+        TopSwing    = this.HighExtremesHolder.getLastUntakenSwing(),
+        BottomSwing = this.LowExtremesHolder.getLastUntakenSwing()
+    )
+
+
+export getExtremesTrackerInstance(int maxExtremesPerSide = 30) =>
+    SwingExtremesTracker.new(
+        HighExtremesHolder = createSwingsHolderInstance(maxExtremesPerSide),
+        LowExtremesHolder  = createSwingsHolderInstance(maxExtremesPerSide),
+        PendingHighs       = array.new<Swing>(),
+        PendingLows        = array.new<Swing>()
+    )
+
+
+//====================================================================
+// DealingRange METHODS
+//====================================================================
+
+export method isValid(DealingRange this) =>
+    ( not( na(this.TopSwing) or na(this.BottomSwing) ) and ( this.TopSwing.HighPrice > this.BottomSwing.LowPrice ) )
+
+
+export method getTopPrice(DealingRange this) =>
+    na(this.TopSwing) ? na : this.TopSwing.HighPrice
+
+
+export method getBottomPrice(DealingRange this) =>
+    na(this.BottomSwing) ? na : this.BottomSwing.LowPrice
+
+
+export method getEquilibriumPrice(DealingRange this) =>
+    this.isValid() ? ( ( this.TopSwing.HighPrice + this.BottomSwing.LowPrice ) / 2.0 ) : na
+
+
+//====================================================================
+// SwingsStorage CONSTRUCTOR & METHODS
+//====================================================================
+
+export getStorageInstance() =>
+    SwingsStorage.new(
+        MapHolders          = map.new<int, SwingsHolder>(),
+        MapExtremesTrackers = map.new<int, SwingExtremesTracker>()
+    )
+
+
+export method getSwingsHolder(SwingsStorage this, int holderKey, bool createIfNotExists = true, int maxSizeIfCreate = 50) =>
+    SwingsHolder swingsHolder = this.MapHolders.get(holderKey)
+    if ( na(swingsHolder) and createIfNotExists )
+        swingsHolder := createSwingsHolderInstance(maxSizeIfCreate)
+        this.MapHolders.put(holderKey, swingsHolder)
+    swingsHolder
+
+
+export method getExtremesTracker(SwingsStorage this, int trackerKey, bool createIfNotExists = true, int maxExtremesPerSide = 30) =>
+    SwingExtremesTracker tracker = this.MapExtremesTrackers.get(trackerKey)
+    if ( na(tracker) and createIfNotExists )
+        tracker := getExtremesTrackerInstance(maxExtremesPerSide)
+        this.MapExtremesTrackers.put(trackerKey, tracker)
+    tracker
+
+
+//====================================================================
+// DEALING RANGE DRAWINGS
+//====================================================================
+
+export getDealingRangeSettingsInstance(
+    color  topColor             = #F23645FF,
+    int    topLineWidth         = 1,
+    string topLineStyle         = line.style_solid,
+    string topLabelText         = "BSL",
+    bool   showTopLabel         = true,
+    color  bottomColor          = #089981FF,
+    int    bottomLineWidth      = 1,
+    string bottomLineStyle      = line.style_solid,
+    string bottomLabelText      = "SSL",
+    bool   showBottomLabel      = true,
+    color  equilibriumColor     = #787B86CC,
+    int    equilibriumLineWidth = 1,
+    string equilibriumLineStyle = line.style_dashed,
+    string equilibriumLabelText = "EQ",
+    bool   showEquilibrium      = true,
+    bool   showEquilibriumLabel = true
+) =>
+    DealingRangeSettings.new(
+        TopColor             = topColor,
+        TopLineWidth         = topLineWidth,
+        TopLineStyle         = topLineStyle,
+        TopLabelText         = topLabelText,
+        ShowTopLabel         = showTopLabel,
+        BottomColor          = bottomColor,
+        BottomLineWidth      = bottomLineWidth,
+        BottomLineStyle      = bottomLineStyle,
+        BottomLabelText      = bottomLabelText,
+        ShowBottomLabel      = showBottomLabel,
+        EquilibriumColor     = equilibriumColor,
+        EquilibriumLineWidth = equilibriumLineWidth,
+        EquilibriumLineStyle = equilibriumLineStyle,
+        EquilibriumLabelText = equilibriumLabelText,
+        ShowEquilibrium      = showEquilibrium,
+        ShowEquilibriumLabel = showEquilibriumLabel
+    )
+
+
+export getDealingRangeDrawingsInstance() =>
+    DealingRangeDrawings.new()
+
+
+export method deleteDrawings(DealingRangeDrawings this) =>
+    line.delete(this.TopLine)
+    label.delete(this.TopLabel)
+    line.delete(this.BottomLine)
+    label.delete(this.BottomLabel)
+    line.delete(this.EquilibriumLine)
+    label.delete(this.EquilibriumLabel)
+    this.TopLine          := na
+    this.TopLabel         := na
+    this.BottomLine       := na
+    this.BottomLabel      := na
+    this.EquilibriumLine  := na
+    this.EquilibriumLabel := na
+
+
+export method synchronizeDrawings(DealingRangeDrawings this, DealingRange dealingRange, DealingRangeSettings settings) =>
+    if ( na(dealingRange) or not( dealingRange.isValid() ) or na(settings) )
+        this.deleteDrawings()
+
+    if ( not( na(dealingRange) ) and dealingRange.isValid() and not( na(settings) ) )
+        int   minAllowedBar = math.max(0, last_bar_index - MAX_LINE_BARS_BACK)
+        int   topStartBar   = math.max(minAllowedBar, dealingRange.TopSwing.HighBarIndex)
+        float topPrice      = dealingRange.TopSwing.HighPrice
+        int   botStartBar   = math.max(minAllowedBar, dealingRange.BottomSwing.LowBarIndex)
+        float botPrice      = dealingRange.BottomSwing.LowPrice
+        int   eqStartBar    = math.max(topStartBar, botStartBar)
+        float eqPrice       = ( ( topPrice + botPrice ) / 2.0 )
+        int   rightBar      = bar_index
+        int   labelBar      = ( rightBar + 1 )
+
+        // --- Top (BSL) ---
+        if ( na(this.TopLine) )
+            this.TopLine := line.new(topStartBar, topPrice, rightBar, topPrice, xloc = xloc.bar_index, color = settings.TopColor, style = settings.TopLineStyle, width = settings.TopLineWidth)
+        else
+            if ( ( this.TopLine.get_x1() != topStartBar ) or ( this.TopLine.get_y1() != topPrice ) )
+                this.TopLine.set_xy1(topStartBar, topPrice)
+            if ( ( this.TopLine.get_x2() != rightBar ) or ( this.TopLine.get_y2() != topPrice ) )
+                this.TopLine.set_xy2(rightBar, topPrice)
+
+        if ( settings.ShowTopLabel and ( str.length(settings.TopLabelText) > 0 ) )
+            if ( na(this.TopLabel) )
+                this.TopLabel := label.new(labelBar, topPrice, text = settings.TopLabelText, xloc = xloc.bar_index, style = label.style_label_center, color = color.new(color.black, 100), textcolor = settings.TopColor, size = size.tiny, text_formatting = text.format_bold)
+            else if ( ( this.TopLabel.get_x() != labelBar ) or ( this.TopLabel.get_y() != topPrice ) )
+                this.TopLabel.set_xy(labelBar, topPrice)
+        else if ( not( na(this.TopLabel) ) )
+            label.delete(this.TopLabel)
+            this.TopLabel := na
+
+        // --- Bottom (SSL) ---
+        if ( na(this.BottomLine) )
+            this.BottomLine := line.new(botStartBar, botPrice, rightBar, botPrice, xloc = xloc.bar_index, color = settings.BottomColor, style = settings.BottomLineStyle, width = settings.BottomLineWidth)
+        else
+            if ( ( this.BottomLine.get_x1() != botStartBar ) or ( this.BottomLine.get_y1() != botPrice ) )
+                this.BottomLine.set_xy1(botStartBar, botPrice)
+            if ( ( this.BottomLine.get_x2() != rightBar ) or ( this.BottomLine.get_y2() != botPrice ) )
+                this.BottomLine.set_xy2(rightBar, botPrice)
+
+        if ( settings.ShowBottomLabel and ( str.length(settings.BottomLabelText) > 0 ) )
+            if ( na(this.BottomLabel) )
+                this.BottomLabel := label.new(labelBar, botPrice, text = settings.BottomLabelText, xloc = xloc.bar_index, style = label.style_label_center, color = color.new(color.black, 100), textcolor = settings.BottomColor, size = size.tiny, text_formatting = text.format_bold)
+            else if ( ( this.BottomLabel.get_x() != labelBar ) or ( this.BottomLabel.get_y() != botPrice ) )
+                this.BottomLabel.set_xy(labelBar, botPrice)
+        else if ( not( na(this.BottomLabel) ) )
+            label.delete(this.BottomLabel)
+            this.BottomLabel := na
+
+        // --- Equilibrium (50%) ---
+        if ( settings.ShowEquilibrium )
+            if ( na(this.EquilibriumLine) )
+                this.EquilibriumLine := line.new(eqStartBar, eqPrice, rightBar, eqPrice, xloc = xloc.bar_index, color = settings.EquilibriumColor, style = settings.EquilibriumLineStyle, width = settings.EquilibriumLineWidth)
+            else
+                if ( ( this.EquilibriumLine.get_x1() != eqStartBar ) or ( this.EquilibriumLine.get_y1() != eqPrice ) )
+                    this.EquilibriumLine.set_xy1(eqStartBar, eqPrice)
+                if ( ( this.EquilibriumLine.get_x2() != rightBar ) or ( this.EquilibriumLine.get_y2() != eqPrice ) )
+                    this.EquilibriumLine.set_xy2(rightBar, eqPrice)
+        else if ( not( na(this.EquilibriumLine) ) )
+            line.delete(this.EquilibriumLine)
+            this.EquilibriumLine := na
+
+        if ( settings.ShowEquilibrium and settings.ShowEquilibriumLabel and ( str.length(settings.EquilibriumLabelText) > 0 ) )
+            if ( na(this.EquilibriumLabel) )
+                this.EquilibriumLabel := label.new(labelBar, eqPrice, text = settings.EquilibriumLabelText, xloc = xloc.bar_index, style = label.style_label_center, color = color.new(color.black, 100), textcolor = settings.EquilibriumColor, size = size.tiny, text_formatting = text.format_bold)
+            else if ( ( this.EquilibriumLabel.get_x() != labelBar ) or ( this.EquilibriumLabel.get_y() != eqPrice ) )
+                this.EquilibriumLabel.set_xy(labelBar, eqPrice)
+        else if ( not( na(this.EquilibriumLabel) ) )
+            label.delete(this.EquilibriumLabel)
+            this.EquilibriumLabel := na
+
+        this.Settings := settings
+
+
+export getDealingRangeDrawingsStorageInstance() =>
+    DealingRangeDrawingsStorage.new(MapDrawings = map.new<int, DealingRangeDrawings>())
+
+
+export method getDealingRangeDrawings(DealingRangeDrawingsStorage this, int rangeKey, bool createIfNotExists = true) =>
+    DealingRangeDrawings rangeDrawings = this.MapDrawings.get(rangeKey)
+    if ( na(rangeDrawings) and createIfNotExists )
+        rangeDrawings := DealingRangeDrawings.new()
+        this.MapDrawings.put(rangeKey, rangeDrawings)
+    rangeDrawings

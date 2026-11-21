@@ -1,0 +1,406 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+library("TimeFrameLibrary", overlay = true)
+
+
+//====================================================================
+// CONSTANTS
+//====================================================================
+
+export const string TIMEZONE_NEW_YORK   = "America/New_York"
+
+export const int    SECONDS_IN_A_DAY     = 86400
+export const int    SECONDS_IN_A_WEEK    = 604800
+export const int    SECONDS_IN_A_MONTH   = 2628003
+export const int    SECONDS_IN_A_QUARTER = 7884009
+export const int    SECONDS_IN_HALF_YEAR = 15768018
+export const int    SECONDS_IN_A_YEAR    = 31536036
+
+
+export getCurrentTimeFrameInSeconds() =>
+    var int currentTimeFrameInSeconds = timeframe.in_seconds(timeframe.period)
+    currentTimeFrameInSeconds
+
+
+//====================================================================
+// CALENDAR PERIOD NUMBER HELPERS
+//====================================================================
+
+export getWeekNumber(int tradingDayTimestamp) =>
+    int((tradingDayTimestamp - ((dayofweek(tradingDayTimestamp, "UTC") - 1) * 86400000)) / 604800000)
+
+
+export getMonthNumber(int tradingDayTimestamp) =>
+    ((year(tradingDayTimestamp, "UTC") * 12) + month(tradingDayTimestamp, "UTC"))
+
+
+export getQuarterNumber(int tradingDayTimestamp) =>
+    ((year(tradingDayTimestamp, "UTC") * 4) + int((month(tradingDayTimestamp, "UTC") - 1) / 3))
+
+
+export getHalfYearNumber(int tradingDayTimestamp) =>
+    ((year(tradingDayTimestamp, "UTC") * 2) + int((month(tradingDayTimestamp, "UTC") - 1) / 6))
+
+
+//====================================================================
+// CALENDAR PERIOD CHANGE HELPERS
+//====================================================================
+
+export newDayStarted() =>
+    varip int lastTradingDay = 0
+    bool      started        = false
+    if ( barstate.isnew )
+        int curTradingDay = nz(time_tradingday)
+        started          := ((lastTradingDay > 0) and (curTradingDay != lastTradingDay))
+        lastTradingDay   := curTradingDay
+    started
+
+
+export newWeekStarted() =>
+    varip int lastTradingDay   = 0
+    varip int lastPeriodNumber = 0
+    bool      started          = false
+    if ( barstate.isnew and (time_tradingday != lastTradingDay) )
+        lastTradingDay      := time_tradingday
+        int curPeriodNumber  = getWeekNumber(time_tradingday)
+        started             := ((lastPeriodNumber > 0) and (curPeriodNumber != lastPeriodNumber))
+        lastPeriodNumber    := curPeriodNumber
+    started
+
+
+export newMonthStarted() =>
+    varip int lastTradingDay   = 0
+    varip int lastPeriodNumber = 0
+    bool      started          = false
+    if ( barstate.isnew and (time_tradingday != lastTradingDay) )
+        lastTradingDay      := time_tradingday
+        int curPeriodNumber  = getMonthNumber(time_tradingday)
+        started             := ((lastPeriodNumber > 0) and (curPeriodNumber != lastPeriodNumber))
+        lastPeriodNumber    := curPeriodNumber
+    started
+
+
+export newQuarterStarted() =>
+    varip int lastTradingDay   = 0
+    varip int lastPeriodNumber = 0
+    bool      started          = false
+    if ( barstate.isnew and (time_tradingday != lastTradingDay) )
+        lastTradingDay      := time_tradingday
+        int curPeriodNumber  = getQuarterNumber(time_tradingday)
+        started             := ((lastPeriodNumber > 0) and (curPeriodNumber != lastPeriodNumber))
+        lastPeriodNumber    := curPeriodNumber
+    started
+
+
+export newHalfYearStarted() =>
+    varip int lastTradingDay   = 0
+    varip int lastPeriodNumber = 0
+    bool      started          = false
+    if ( barstate.isnew and (time_tradingday != lastTradingDay) )
+        lastTradingDay      := time_tradingday
+        int curPeriodNumber  = getHalfYearNumber(time_tradingday)
+        started             := ((lastPeriodNumber > 0) and (curPeriodNumber != lastPeriodNumber))
+        lastPeriodNumber    := curPeriodNumber
+    started
+
+
+export newYearStarted() =>
+    varip int lastTradingDay   = 0
+    varip int lastPeriodNumber = 0
+    bool      started          = false
+    if ( barstate.isnew and (time_tradingday != lastTradingDay) )
+        lastTradingDay      := time_tradingday
+        int curPeriodNumber  = year(time_tradingday, "UTC")
+        started             := ((lastPeriodNumber > 0) and (curPeriodNumber != lastPeriodNumber))
+        lastPeriodNumber    := curPeriodNumber
+    started
+
+
+export newCalendarTimeFrameStarted(int timeFrameInSeconds) =>
+    bool started = switch timeFrameInSeconds
+        SECONDS_IN_A_DAY     => newDayStarted()
+        SECONDS_IN_A_WEEK    => newWeekStarted()
+        SECONDS_IN_A_MONTH   => newMonthStarted()
+        SECONDS_IN_A_QUARTER => newQuarterStarted()
+        SECONDS_IN_HALF_YEAR => newHalfYearStarted()
+        SECONDS_IN_A_YEAR    => newYearStarted()
+        =>                      false
+    started
+
+
+//====================================================================
+// TYPES
+//====================================================================
+
+export type TimeFrame
+    varip int   InSeconds          = 0
+
+    varip int   OpenTime           = 0
+    varip int   CloseTime          = 0
+    varip int   TradingDay         = 0
+    varip bool  IsOpen             = false
+    varip bool  IsClosed           = false
+
+    varip float OpenPrice          = 0
+    varip float HighPrice          = 0
+    varip float LowPrice           = 0
+    varip float ClosePrice         = 0
+
+    varip int   OpenBarIndex       = 0
+    varip int   HighBarIndex       = 0
+    varip int   LowBarIndex        = 0
+    varip int   CloseBarIndex      = 0
+
+    varip int   HighCrossedByIndex = 0
+    varip int   LowCrossedByIndex  = 0
+
+
+export type TimeFramesHolder
+    varip map<int, TimeFrame> MapTimeFrames  = na
+    varip TimeFrame           LastRegistered = na
+    varip array<TimeFrame>    CachedValues   = na
+    varip bool                IsCacheInSync  = false
+    varip int                 MaxSize        = 25
+
+
+export type TimeFramesStorage
+    varip map<int, TimeFramesHolder> MapHolders = na
+
+
+//====================================================================
+// TIMEFRAME & SESSION BUILDERS
+//====================================================================
+
+export getCalendarTimeFrameInstance(string timeFrameStr, bool isOpen = false) =>
+    TimeFrame result   = TimeFrame.new()
+    result.InSeconds  := timeframe.in_seconds(timeFrameStr)
+    result.OpenTime   := nz(time(timeFrameStr))
+    result.CloseTime  := nz(time_close(timeFrameStr))
+    result.TradingDay := nz(time_tradingday)
+    result.IsOpen     := isOpen
+    result
+
+
+export getSessionBasedTimeFrameInstance(string sessionMask, string timeZone = "America/New_York") =>
+    TimeFrame result  = TimeFrame.new()
+    result.TradingDay := nz(time_tradingday)
+    result.OpenTime   := nz(time(timeframe.period, sessionMask, timeZone))
+    result.CloseTime  := nz(time_close(timeframe.period, sessionMask, timeZone))
+    result.InSeconds  := (result.CloseTime <= result.OpenTime) ? 0 : int((result.CloseTime - result.OpenTime) / 1000)
+    result.IsOpen     := (result.InSeconds > 0)
+    result
+
+
+//====================================================================
+// TimeFrame METHODS
+//====================================================================
+
+export method isIntraday(TimeFrame this) =>
+    (this.InSeconds < SECONDS_IN_A_DAY)
+
+
+export method isCalendar(TimeFrame this) =>
+    (this.InSeconds >= SECONDS_IN_A_DAY)
+
+
+export method isDaily(TimeFrame this) =>
+    (this.InSeconds == SECONDS_IN_A_DAY)
+
+
+export method isWeekly(TimeFrame this) =>
+    (this.InSeconds == SECONDS_IN_A_WEEK)
+
+
+export method isMonthly(TimeFrame this) =>
+    (this.InSeconds == SECONDS_IN_A_MONTH)
+
+
+export method isQuarterly(TimeFrame this) =>
+    (this.InSeconds == SECONDS_IN_A_QUARTER)
+
+
+export method isSemiAnnually(TimeFrame this) =>
+    (this.InSeconds == SECONDS_IN_HALF_YEAR)
+
+
+export method isAnnually(TimeFrame this) =>
+    (this.InSeconds == SECONDS_IN_A_YEAR)
+
+
+export method highWasCrossed(TimeFrame this) =>
+    (this.HighCrossedByIndex > 0)
+
+
+export method lowWasCrossed(TimeFrame this) =>
+    (this.LowCrossedByIndex > 0)
+
+
+export method isPending(TimeFrame this) =>
+    (not( this.IsOpen ) and not( this.IsClosed ))
+
+
+export method isActive(TimeFrame this) =>
+    (this.IsOpen and not( this.IsClosed ))
+
+
+export method isComplete(TimeFrame this) =>
+    (this.IsOpen and this.IsClosed)
+
+
+export method getPeriodOffset(TimeFrame this) =>
+    int offset = switch
+        this.isDaily()        => int((time_tradingday - this.TradingDay) / 86400000)
+        this.isWeekly()       => (getWeekNumber(time_tradingday)     - getWeekNumber(this.TradingDay))
+        this.isMonthly()      => (getMonthNumber(time_tradingday)    - getMonthNumber(this.TradingDay))
+        this.isQuarterly()    => (getQuarterNumber(time_tradingday)  - getQuarterNumber(this.TradingDay))
+        this.isSemiAnnually() => (getHalfYearNumber(time_tradingday) - getHalfYearNumber(this.TradingDay))
+        this.isAnnually()     => (year(time_tradingday, "UTC")       - year(this.TradingDay, "UTC"))
+        =>                       0
+    offset
+
+
+export method logPrices(TimeFrame this) =>
+    log.info('O: ' + str.tostring(this.OpenPrice) + ' H: ' + str.tostring(this.HighPrice) + ' L: ' + str.tostring(this.LowPrice) + ' C: ' + str.tostring(this.ClosePrice))
+
+
+export method logOpenCloseTime(TimeFrame this, string timezone = "America/New_York") =>
+    log.info('OT: ' + str.format_time(this.OpenTime, "yyyy-MM-dd HH:mm:ss", timezone) + ' CT: ' + str.format_time(this.CloseTime, "yyyy-MM-dd HH:mm:ss", timezone))
+
+
+export method update(TimeFrame this, int barIndex = bar_index, float openPrice = open, float highPrice = high, float lowPrice = low, float closePrice = close) =>
+    if ( not( this.IsOpen ) or (this.OpenPrice == 0) )
+        this.IsOpen        := true
+        this.OpenPrice     := openPrice
+        this.OpenBarIndex  := barIndex
+        this.HighPrice     := highPrice
+        this.HighBarIndex  := barIndex
+        this.LowPrice      := lowPrice
+        this.LowBarIndex   := barIndex
+    else
+        if ( highPrice > this.HighPrice )
+            this.HighPrice    := highPrice
+            this.HighBarIndex := barIndex
+        if ( lowPrice < this.LowPrice )
+            this.LowPrice    := lowPrice
+            this.LowBarIndex := barIndex
+    this.ClosePrice    := closePrice
+    this.CloseBarIndex := barIndex
+
+
+export method markClosed(TimeFrame this) =>
+    this.IsClosed := true
+
+
+//====================================================================
+// TimeFramesHolder METHODS
+//====================================================================
+
+export method clear(TimeFramesHolder this) =>
+    if ( this.MapTimeFrames.size() > 0 )
+        this.MapTimeFrames.clear()
+        this.CachedValues.clear()
+
+    if ( this.MaxSize < 0 )
+        this.MaxSize := 0
+
+    this.LastRegistered := na
+    this.IsCacheInSync  := true
+
+
+export method enforceMaxSize(TimeFramesHolder this) =>
+    if ( this.MaxSize > 0 )
+        int overflow = this.MapTimeFrames.size() - this.MaxSize
+        if ( overflow > 0 )
+            if ( overflow == 1 )
+                for [mapKey, _] in this.MapTimeFrames
+                    this.MapTimeFrames.remove(mapKey)
+                    break
+            else
+                for [index, mapKey] in this.MapTimeFrames.keys()
+                    this.MapTimeFrames.remove(mapKey)
+                    if ( index == (overflow - 1) )
+                        break
+            this.IsCacheInSync := false
+    else
+        this.clear()
+
+
+export method setMaxSize(TimeFramesHolder this, int maxSize) =>
+    this.MaxSize := (maxSize > 0) ? maxSize : 0
+    this.enforceMaxSize()
+
+
+export method registerTimeFrame(TimeFramesHolder this, TimeFrame tf) =>
+    TimeFrame existingTimeFrame = na
+    if ( (this.MaxSize > 0) and not( na(tf) ) )
+        this.LastRegistered := tf
+        existingTimeFrame   := this.MapTimeFrames.put(tf.OpenTime, tf)
+        this.IsCacheInSync  := false
+        this.enforceMaxSize()
+    existingTimeFrame
+
+
+export method getTimeFrame(TimeFramesHolder this, int openTime) =>
+    this.MapTimeFrames.get(openTime)
+
+
+export method hasRegisteredTimeFrame(TimeFramesHolder this, int openTime) =>
+    this.MapTimeFrames.contains(openTime)
+
+
+export method getRegisteredTimeFrames(TimeFramesHolder this) =>
+    if ( not( this.IsCacheInSync ) )
+        this.CachedValues  := this.MapTimeFrames.values()
+        this.IsCacheInSync := true
+    this.CachedValues
+
+
+export method removeTimeFrame(TimeFramesHolder this, int openTime) =>
+    TimeFrame removedTimeFrame = this.MapTimeFrames.remove(openTime)
+    if ( not( na(removedTimeFrame) ) )
+        this.IsCacheInSync := false
+        if ( this.MapTimeFrames.size() == 0 )
+            this.LastRegistered := na
+        else if ( removedTimeFrame.OpenTime == this.LastRegistered.OpenTime )
+            this.LastRegistered := this.getRegisteredTimeFrames().last()
+    removedTimeFrame
+
+
+export method countTimeFrames(TimeFramesHolder this) =>
+    this.MapTimeFrames.size()
+
+
+export method getLastRegisteredTimeFrame(TimeFramesHolder this) =>
+    this.LastRegistered
+
+
+export method getLastRegisteredOpenTime(TimeFramesHolder this) =>
+    na(this.LastRegistered) ? 0 : this.LastRegistered.OpenTime
+
+
+//====================================================================
+// TimeFramesStorage CONSTRUCTOR
+//====================================================================
+
+export getStorageInstance() =>
+    TimeFramesStorage.new(map.new<int, TimeFramesHolder>())
+
+
+//====================================================================
+// TimeFramesStorage METHODS
+//====================================================================
+
+export method getTimeFramesHolder(TimeFramesStorage this, int holderKey, bool createIfNotExists = true, int maxSizeIfCreate = 25) =>
+    TimeFramesHolder holder = this.MapHolders.get(holderKey)
+    if ( na(holder) and createIfNotExists )
+        holder := TimeFramesHolder.new(
+            MapTimeFrames  = map.new<int, TimeFrame>(),
+            LastRegistered = na,
+            CachedValues   = array.new<TimeFrame>(),
+            IsCacheInSync  = true
+        )
+        holder.setMaxSize(maxSizeIfCreate)
+        this.MapHolders.put(holderKey, holder)
+    holder

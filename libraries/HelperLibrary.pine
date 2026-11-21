@@ -1,0 +1,332 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+library("HelperLibrary", overlay = true)
+
+
+//====================================================================
+// COMPOSITE INT KEY CONSTANTS (53-bit exact integer budget: 2^53 - 1 = 9,007,199,254,740,991)
+//
+// Bit layout: [ tertiaryId (42 bits) | groupId (4 bits) | subGroupId (7 bits) ] = 53 bits total
+//   - groupId    : 4 bits  -> min: 0, max: 15
+//   - subGroupId : 7 bits  -> min: 0, max: 127
+//   - tertiaryId : 42 bits -> min: 0, max: 4,398,046,511,103
+//                  (exact for ANY integer in 0..4,398,046,511,103, including raw Pine `time` ms up to May 15, 2109)
+//====================================================================
+
+const int HELPER_SHIFT_GRP_MULT  = 128   // 2^7  (7 bits reserved for subGroupId: 0..127)
+const int HELPER_SHIFT_TERT_MULT = 2048  // 2^11 (7 + 4 bits reserved below tertiaryId)
+const int HELPER_GRP_MOD         = 16    // 2^4  (4 bits for groupId: 0..15)
+
+
+//====================================================================
+// COMPOSITE INT KEY FUNCTIONS
+//====================================================================
+
+// Packs (groupId, subGroupId, tertiaryId) into a single 53-bit-safe Pine int with zero truncation.
+// Max values:
+//   - groupId    : 0 .. 15
+//   - subGroupId : 0 .. 127
+//   - tertiaryId : 0 .. 4,398,046,511,103 (raw Pine `time` ms up to May 15, 2109, or any exact int)
+export getCompositeIntKey(int groupId, int subGroupId, int tertiaryId = 0) =>
+    int grp = (groupId % HELPER_GRP_MOD)
+    int sub = (subGroupId % HELPER_SHIFT_GRP_MULT)
+    ((tertiaryId * HELPER_SHIFT_TERT_MULT) + (grp * HELPER_SHIFT_GRP_MULT) + sub)
+
+
+export getKeyGroupId(int key) =>
+    (int(key / HELPER_SHIFT_GRP_MULT) % HELPER_GRP_MOD)
+
+
+export getKeySubGroupId(int key) =>
+    (key % HELPER_SHIFT_GRP_MULT)
+
+
+export getKeyTertiary(int key) =>
+    int(key / HELPER_SHIFT_TERT_MULT)
+
+
+//====================================================================
+// TRADING PERIOD WINDOW HELPERS
+//====================================================================
+
+// Is the bar part of a period that starts at or after a computed calendar anchor in the past?
+export isBarInLookBackWindow(string unit, int qty) =>
+    // var bool isInReplayMode = (timenow < time or timenow >= time_close)
+    // int src = isInReplayMode ? last_bar_time : timenow
+    int src = last_bar_time
+
+    int y = year(src, "UTC")
+    int m = month(src, "UTC")
+    int d = dayofmonth(src, "UTC")
+
+    int lookbackDays   = 0
+    int lookbackMonths = 0
+
+    if ( unit == "M" )
+        lookbackMonths := qty
+    else if ( unit == "W" )
+        lookbackDays := (qty * 7)
+    else
+        lookbackDays := qty
+
+    int windowStart = timestamp("UTC", y, m - lookbackMonths, d - lookbackDays, 0, 0)
+
+    // Weekend Adjustment
+    int dow      = dayofweek(windowStart, "UTC")
+    int adjStart = windowStart
+
+    if ( dow == 1 ) // Sunday
+        adjStart := (windowStart - (2 * 86400000))
+    else if ( dow == 7 ) // Saturday
+        adjStart := (windowStart - (1 * 86400000))
+
+    (time_tradingday >= adjStart)
+
+
+hasTradingDayChanged() =>
+    varip int lastDay = 0
+    bool      changed = false
+    if ( barstate.isnew )
+        int curDay = nz(time_tradingday)
+        changed   := ((lastDay > 0) and (curDay != lastDay))
+        lastDay   := curDay
+    changed
+
+
+hasTradingWeekChanged() =>
+    varip int lastDay          = 0
+    varip int lastPeriodNumber = 0
+    bool      changed          = false
+    if ( barstate.isnew and (time_tradingday != lastDay) )
+        lastDay             := time_tradingday
+        int curPeriodNumber  = int((time_tradingday - ((dayofweek(time_tradingday, "UTC") - 1) * 86400000)) / 604800000)
+        changed             := ((lastPeriodNumber > 0) and (curPeriodNumber != lastPeriodNumber))
+        lastPeriodNumber    := curPeriodNumber
+    changed
+
+
+hasTradingMonthChanged() =>
+    varip int lastDay          = 0
+    varip int lastPeriodNumber = 0
+    bool      changed          = false
+    if ( barstate.isnew and (time_tradingday != lastDay) )
+        lastDay             := time_tradingday
+        int curPeriodNumber  = ((year(time_tradingday, "UTC") * 12) + month(time_tradingday, "UTC"))
+        changed             := ((lastPeriodNumber > 0) and (curPeriodNumber != lastPeriodNumber))
+        lastPeriodNumber    := curPeriodNumber
+    changed
+
+
+hasTradingYearChanged() =>
+    varip int lastDay  = 0
+    varip int lastYear = 0
+    bool      changed  = false
+    if ( barstate.isnew and (time_tradingday != lastDay) )
+        lastDay     := time_tradingday
+        int curYear  = year(time_tradingday, "UTC")
+        changed     := ((lastYear > 0) and (curYear != lastYear))
+        lastYear    := curYear
+    changed
+
+
+export isBarInCurrentTradingDay() =>
+    varip int lastDay   = 0
+    varip int timeClose = 0
+    if ( barstate.isnew and (time_tradingday != lastDay) )
+        lastDay   := time_tradingday
+        timeClose := nz(time_close("1D"))
+    (timeClose > last_bar_time)
+
+
+export isBarInLast_1_TradingDay() =>
+    varip bool isInPeriod = isBarInLookBackWindow("D", 1)
+    once ( isInPeriod or (hasTradingDayChanged() and isBarInLookBackWindow("D", 1)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInLast_2_TradingDays() =>
+    varip bool isInPeriod = isBarInLookBackWindow("D", 2)
+    once ( isInPeriod or (hasTradingDayChanged() and isBarInLookBackWindow("D", 2)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInLast_3_TradingDays() =>
+    varip bool isInPeriod = isBarInLookBackWindow("D", 3)
+    once ( isInPeriod or (hasTradingDayChanged() and isBarInLookBackWindow("D", 3)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInLast_5_TradingDays() =>
+    varip bool isInPeriod = isBarInLookBackWindow("D", 5)
+    once ( isInPeriod or (hasTradingDayChanged() and isBarInLookBackWindow("D", 5)) )
+        isInPeriod := true
+    isInPeriod
+
+
+//====================================================================
+//   DACA ADAUG 1 LA QTY obting exact trading week/month : isBarInLookBackWindow - returneaza calendar days
+//====================================================================
+
+export isBarInCurrentTradingWeek() =>
+    varip int timeClose = nz(time_close("1W"))
+    if ( barstate.isnew and ((timeClose == 0) or ((timeClose <= last_bar_time) and hasTradingWeekChanged())) )
+        timeClose := nz(time_close("1W"))
+    (timeClose > last_bar_time)
+
+
+export isBarInLast_1_TradingWeek() =>
+    varip bool isInPeriod = isBarInLookBackWindow("W", 1 + 1)
+    once ( isInPeriod or (hasTradingWeekChanged() and isBarInLookBackWindow("W", 1 + 1)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInLast_2_TradingWeeks() =>
+    varip bool isInPeriod = isBarInLookBackWindow("W", 2 + 1)
+    once ( isInPeriod or (hasTradingWeekChanged() and isBarInLookBackWindow("W", 2 + 1)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInLast_4_TradingWeeks() =>
+    varip bool isInPeriod = isBarInLookBackWindow("W", 4 + 1)
+    once ( isInPeriod or (hasTradingWeekChanged() and isBarInLookBackWindow("W", 4 + 1)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInCurrentTradingMonth() =>
+    varip int timeClose = nz(time_close("1M"))
+    if ( barstate.isnew and ((timeClose == 0) or ((timeClose <= last_bar_time) and hasTradingMonthChanged())) )
+        timeClose := nz(time_close("1M"))
+    (timeClose > last_bar_time)
+
+
+export isBarInLast_1_TradingMonth() =>
+    varip bool isInPeriod = isBarInLookBackWindow("M", 1 + 1)
+    once ( isInPeriod or (hasTradingMonthChanged() and isBarInLookBackWindow("M", 1 + 1)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInLast_2_TradingMonths() =>
+    varip bool isInPeriod = isBarInLookBackWindow("M", 2 + 1)
+    once ( isInPeriod or (hasTradingMonthChanged() and isBarInLookBackWindow("M", 2 + 1)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInLast_3_TradingMonths() =>
+    varip bool isInPeriod = isBarInLookBackWindow("M", 3 + 1)
+    once ( isInPeriod or (hasTradingMonthChanged() and isBarInLookBackWindow("M", 3 + 1)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInLast_6_TradingMonths() =>
+    varip bool isInPeriod = isBarInLookBackWindow("M", 6 + 1)
+    once ( isInPeriod or (hasTradingMonthChanged() and isBarInLookBackWindow("M", 6 + 1)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInCurrentTradingYear() =>
+    varip int timeClose = nz(time_close("12M"))
+    if ( barstate.isnew and ((timeClose == 0) or ((timeClose <= last_bar_time) and hasTradingYearChanged())) )
+        timeClose := nz(time_close("12M"))
+    (timeClose > last_bar_time)
+
+
+export isBarInLast_1_TradingYear() =>
+    varip bool isInPeriod = isBarInLookBackWindow("M", 12 + 1)
+    once ( isInPeriod or (hasTradingYearChanged() and isBarInLookBackWindow("M", 12 + 1)) )
+        isInPeriod := true
+    isInPeriod
+
+
+export isBarInLast_2_TradingYears() =>
+    varip bool isInPeriod = isBarInLookBackWindow("M", 24 + 1)
+    once ( isInPeriod or (hasTradingYearChanged() and isBarInLookBackWindow("M", 24 + 1)) )
+        isInPeriod := true
+    isInPeriod
+
+
+//====================================================================
+// ARRAY SET OPERATIONS
+//====================================================================
+
+export method intersectArrays(array<int> firstArray, array<int> secondArray, array<int> thirdArray = na, bool sortOutput = false, bool sortAscending = true) =>
+    int        firstSize     = firstArray.size()
+    int        secondSize    = secondArray.size()
+    int        thirdSize     = not( na(thirdArray) ) ? thirdArray.size() : 0
+    bool       hasThirdArray = (thirdSize > 0)
+    array<int> outputArray   = array.new<int>()
+
+    if ( (firstSize > 0) and (secondSize > 0) )
+        map<int, int> lookupMap = map.new<int, int>()
+        bool firstIsGreater     = (firstSize > secondSize)
+        for value in (firstIsGreater ? firstArray : secondArray)
+            lookupMap.put(value, 1)
+
+        if ( not( hasThirdArray ) )
+            for value in (firstIsGreater ? secondArray : firstArray)
+                if ( lookupMap.get(value) == 1 )
+                    lookupMap.put(value, 2)
+                    outputArray.push(value)
+        else
+            for value in (firstIsGreater ? secondArray : firstArray)
+                if ( lookupMap.get(value) == 1 )
+                    lookupMap.put(value, 2)
+            for value in thirdArray
+                if ( lookupMap.get(value) == 2 )
+                    lookupMap.put(value, 3)
+                    outputArray.push(value)
+
+        if ( sortOutput )
+            outputArray.sort(sortAscending ? order.ascending : order.descending)
+    outputArray
+
+
+export method arrayDifference(array<int> firstArray, array<int> secondArray, array<int> thirdArray = na, bool sortOutput = false, bool sortAscending = true) =>
+    int        firstSize     = firstArray.size()
+    int        secondSize    = secondArray.size()
+    int        thirdSize     = not( na(thirdArray) ) ? thirdArray.size() : 0
+    bool       hasThirdArray = (thirdSize > 0)
+    array<int> outputArray   = array.new<int>()
+
+    if ( firstSize > 0 )
+        if ( (firstSize + secondSize + thirdSize) < 40 )
+            for value in firstArray
+                if ( not( secondArray.includes(value) ) and (not( hasThirdArray ) or not( thirdArray.includes(value) )) )
+                    if ( not( outputArray.includes(value) ) )
+                        outputArray.push(value)
+        else
+            map<int, int> lookupMap = map.new<int, int>()
+            if ( firstSize <= (secondSize + thirdSize) )
+                for value in firstArray
+                    lookupMap.put(value, 1)
+                for value in secondArray
+                    lookupMap.remove(value)
+                if ( hasThirdArray )
+                    for value in thirdArray
+                        lookupMap.remove(value)
+                outputArray := lookupMap.keys()
+            else
+                for value in secondArray
+                    lookupMap.put(value, 1)
+                if ( hasThirdArray )
+                    for value in thirdArray
+                        lookupMap.put(value, 1)
+                for value in firstArray
+                    if ( not( lookupMap.contains(value) ) and not( outputArray.includes(value) ) )
+                        outputArray.push(value)
+
+        if ( sortOutput )
+            outputArray.sort(sortAscending ? order.ascending : order.descending)
+
+    outputArray

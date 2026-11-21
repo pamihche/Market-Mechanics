@@ -1,0 +1,216 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+indicator("Swing Extremes & Dealing Range Test", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+
+import MihChe/CandleLibrary/1 as CandleLib
+import MihChe/SwingLibrary/1  as SwingLib
+
+
+//====================================================================
+// INPUTS
+//====================================================================
+
+int   inMaxExtremes       = input.int(30,          "Max Extremes Per Side",                minval = 5,   maxval = 100,  group = "Extremes Engine")
+bool  inRemoveBroken      = input.bool(false,      "Remove Body-Broken Extremes",          group = "Extremes Engine")
+
+bool  inShowDealingRange  = input.bool(true,       "Show Dealing Range (BSL / SSL)",       group = "Dealing Range")
+bool  inShowEquilibrium   = input.bool(true,       "Show Equilibrium (50%)",               group = "Dealing Range")
+bool  inShowRangeLabels   = input.bool(true,       "Show Dealing Range Labels",            group = "Dealing Range")
+
+bool  inShowLegZigZag     = input.bool(true,       "Show Structural Legs (ZigZag)",        group = "Debug Visuals")
+bool  inShowUntakenMarks  = input.bool(true,       "Show Untaken Extreme Markers",         group = "Debug Visuals")
+bool  inShowTakenMarks    = input.bool(true,       "Show Swept / Broken Markers",          group = "Debug Visuals")
+
+color inTopColor          = input.color(#F23645FF, "Top / BSL Color",                      group = "Colors")
+color inBottomColor       = input.color(#089981FF, "Bottom / SSL Color",                   group = "Colors")
+color inEquilibriumColor  = input.color(#787B86CC, "Equilibrium (EQ) Color",               group = "Colors")
+color inLegLineColor      = input.color(#787B8688, "Structural Leg Color",                 group = "Colors")
+
+
+//====================================================================
+// HELPERS
+//====================================================================
+
+int MAX_DRAW_BARS_BACK = 4900
+
+buildSwingFromCandle(SwingLib.SwingType swingType, CandleLib.Candle candle) =>
+    SwingLib.Swing.new(
+        IntType       = swingType.toIntType(),
+        BarIndex      = candle.BarIndex,
+        OpenTime      = candle.OpenTime,
+        CloseTime     = candle.CloseTime,
+        OpenPrice     = candle.OpenPrice,
+        HighPrice     = candle.HighPrice,
+        LowPrice      = candle.LowPrice,
+        ClosePrice    = candle.ClosePrice,
+        OpenBarIndex  = candle.OpenBarIndex,
+        HighBarIndex  = candle.HighBarIndex,
+        LowBarIndex   = candle.LowBarIndex,
+        CloseBarIndex = candle.CloseBarIndex
+    )
+
+
+//====================================================================
+// STORAGE INITIALIZATION & CONFIRMED-BAR PROCESSING
+//====================================================================
+
+var SwingLib.SwingsStorage               SwingsStore        = SwingLib.getStorageInstance()
+var SwingLib.SwingExtremesTracker        Tracker            = SwingsStore.getExtremesTracker(1, true, inMaxExtremes)
+var SwingLib.DealingRangeDrawingsStorage RangeDrawingsStore = SwingLib.getDealingRangeDrawingsStorageInstance()
+var SwingLib.DealingRangeDrawings        RangeDrawings      = RangeDrawingsStore.getDealingRangeDrawings(1)
+
+var SwingLib.DealingRangeSettings RangeSettings = SwingLib.getDealingRangeSettingsInstance(
+    topColor             = inTopColor,
+    showTopLabel         = inShowRangeLabels,
+    bottomColor          = inBottomColor,
+    showBottomLabel      = inShowRangeLabels,
+    equilibriumColor     = inEquilibriumColor,
+    showEquilibrium      = inShowEquilibrium,
+    showEquilibriumLabel = inShowRangeLabels
+)
+
+var CandleLib.Candle leftCandle   = na
+var CandleLib.Candle middleCandle = na
+
+if ( barstate.isconfirmed )
+    CandleLib.Candle rightCandle = CandleLib.Candle.new()
+    rightCandle.setBarIndex()
+    rightCandle.setOpenCloseTime()
+    rightCandle.setPrices()
+
+    if ( not( na(leftCandle) or na(middleCandle) ) )
+        bool isSwingHigh = ( ( leftCandle.HighPrice < middleCandle.HighPrice ) and ( middleCandle.HighPrice > rightCandle.HighPrice ) )
+        bool isSwingLow  = ( ( leftCandle.LowPrice  > middleCandle.LowPrice )  and ( middleCandle.LowPrice  < rightCandle.LowPrice ) )
+
+        if ( isSwingHigh and isSwingLow )
+            if ( middleCandle.isBullish() )
+                Tracker.processNewSwing(buildSwingFromCandle(SwingLib.SwingType.SwingLow,  middleCandle))
+                Tracker.processNewSwing(buildSwingFromCandle(SwingLib.SwingType.SwingHigh, middleCandle))
+            else
+                Tracker.processNewSwing(buildSwingFromCandle(SwingLib.SwingType.SwingHigh, middleCandle))
+                Tracker.processNewSwing(buildSwingFromCandle(SwingLib.SwingType.SwingLow,  middleCandle))
+        else if ( isSwingHigh )
+            Tracker.processNewSwing(buildSwingFromCandle(SwingLib.SwingType.SwingHigh, middleCandle))
+        else if ( isSwingLow )
+            Tracker.processNewSwing(buildSwingFromCandle(SwingLib.SwingType.SwingLow,  middleCandle))
+
+    Tracker.updateExtremes(rightCandle.BarIndex, rightCandle.OpenTime, rightCandle.HighPrice, rightCandle.LowPrice, rightCandle.ClosePrice, inRemoveBroken)
+
+    leftCandle   := middleCandle
+    middleCandle := rightCandle
+
+
+//====================================================================
+// RENDERING ON LAST BAR
+//====================================================================
+
+plot(close, display = display.none)
+
+var array<line>  debugLines    = array.new<line>()
+var array<label> debugLabels   = array.new<label>()
+var int          lastLoggedBar = -1
+
+if ( barstate.islast )
+    SwingLib.DealingRange currentRange = Tracker.getDealingRange()
+
+    // 1. Dealing Range (BSL / SSL / EQ) via SwingLibrary
+    if ( inShowDealingRange )
+        RangeDrawings.synchronizeDrawings(currentRange, RangeSettings)
+    else
+        RangeDrawings.deleteDrawings()
+
+    array<SwingLib.Swing> highExtremes = Tracker.HighExtremesHolder.getRegisteredSwings()
+    array<SwingLib.Swing> lowExtremes  = Tracker.LowExtremesHolder.getRegisteredSwings()
+
+    if ( bar_index != lastLoggedBar )
+        lastLoggedBar := bar_index
+
+        int untakenHighs = 0
+        for h in highExtremes
+            if ( not( h.isTaken() ) )
+                untakenHighs += 1
+
+        int untakenLows = 0
+        for l in lowExtremes
+            if ( not( l.isTaken() ) )
+                untakenLows += 1
+
+        SwingLib.Swing lastRegH = Tracker.HighExtremesHolder.getLastRegisteredSwing()
+        SwingLib.Swing lastRegL = Tracker.LowExtremesHolder.getLastRegisteredSwing()
+
+        string lastHDesc = na(lastRegH) ? "na" : str.format("px={0} bar={1} swp={2} brk={3}", lastRegH.HighPrice, lastRegH.HighBarIndex, lastRegH.SweptByBarIndex, lastRegH.BrokenByBarIndex)
+        string lastLDesc = na(lastRegL) ? "na" : str.format("px={0} bar={1} swp={2} brk={3}", lastRegL.LowPrice,  lastRegL.LowBarIndex,  lastRegL.SweptByBarIndex, lastRegL.BrokenByBarIndex)
+        string topDesc   = na(currentRange.TopSwing)    ? "na" : str.format("px={0} bar={1}", currentRange.TopSwing.HighPrice,   currentRange.TopSwing.HighBarIndex)
+        string botDesc   = na(currentRange.BottomSwing) ? "na" : str.format("px={0} bar={1}", currentRange.BottomSwing.LowPrice, currentRange.BottomSwing.LowBarIndex)
+        string topLnDesc = na(RangeDrawings.TopLine)         ? "na" : str.format("({0},{1})->({2},{3})", RangeDrawings.TopLine.get_x1(),         RangeDrawings.TopLine.get_y1(),         RangeDrawings.TopLine.get_x2(),         RangeDrawings.TopLine.get_y2())
+        string botLnDesc = na(RangeDrawings.BottomLine)      ? "na" : str.format("({0},{1})->({2},{3})", RangeDrawings.BottomLine.get_x1(),      RangeDrawings.BottomLine.get_y1(),      RangeDrawings.BottomLine.get_x2(),      RangeDrawings.BottomLine.get_y2())
+        string eqLnDesc  = na(RangeDrawings.EquilibriumLine) ? "na" : str.format("({0},{1})->({2},{3})", RangeDrawings.EquilibriumLine.get_x1(), RangeDrawings.EquilibriumLine.get_y1(), RangeDrawings.EquilibriumLine.get_x2(), RangeDrawings.EquilibriumLine.get_y2())
+
+        log.info(
+            "\n[DR DEBUG] bar={0} lastBar={1} close={2}" +
+            "\n  HighExt: total={3} untaken={4} pendingH={5} lastRegH=[{6}]" +
+            "\n  LowExt:  total={7} untaken={8} pendingL={9} lastRegL=[{10}]" +
+            "\n  Range:   isValid={11} Top=[{12}] Bot=[{13}] EQ={14}" +
+            "\n  Lines:   showDR={15} TopLn={16} BotLn={17} EqLn={18} TopLblNa={19} BotLblNa={20} EqLblNa={21}",
+            bar_index, last_bar_index, close,
+            highExtremes.size(), untakenHighs, Tracker.PendingHighs.size(), lastHDesc,
+            lowExtremes.size(),  untakenLows,  Tracker.PendingLows.size(),  lastLDesc,
+            currentRange.isValid(), topDesc, botDesc, currentRange.getEquilibriumPrice(),
+            inShowDealingRange, topLnDesc, botLnDesc, eqLnDesc, na(RangeDrawings.TopLabel), na(RangeDrawings.BottomLabel), na(RangeDrawings.EquilibriumLabel)
+        )
+
+    // 2. Optional Debug Overlay (ZigZag + Extreme State Markers)
+    while ( debugLines.size() > 0 )
+        line.delete(debugLines.pop())
+    while ( debugLabels.size() > 0 )
+        label.delete(debugLabels.pop())
+
+    int minAllowedBar = math.max(0, last_bar_index - MAX_DRAW_BARS_BACK)
+
+    if ( inShowLegZigZag )
+        int hIdx = ( highExtremes.size() - 1 )
+        int lIdx = ( lowExtremes.size() - 1 )
+
+        int   prevBar   = na
+        float prevPrice = na
+
+        while ( ( hIdx >= 0 ) or ( lIdx >= 0 ) )
+            bool takeHigh = false
+            if ( ( hIdx >= 0 ) and ( lIdx >= 0 ) )
+                takeHigh := ( highExtremes.get(hIdx).OpenTime >= lowExtremes.get(lIdx).OpenTime )
+            else
+                takeHigh := ( hIdx >= 0 )
+
+            SwingLib.Swing currentExtreme = takeHigh ? highExtremes.get(hIdx)        : lowExtremes.get(lIdx)
+            int            currentBar     = takeHigh ? currentExtreme.HighBarIndex   : currentExtreme.LowBarIndex
+            float          currentPrice   = takeHigh ? currentExtreme.HighPrice      : currentExtreme.LowPrice
+
+            if ( currentBar >= minAllowedBar )
+                if ( not( na(prevBar) ) )
+                    debugLines.push(line.new(currentBar, currentPrice, prevBar, prevPrice, xloc = xloc.bar_index, color = inLegLineColor, style = line.style_solid, width = 1))
+                prevBar   := currentBar
+                prevPrice := currentPrice
+
+            if ( takeHigh )
+                hIdx -= 1
+            else
+                lIdx -= 1
+
+    if ( inShowUntakenMarks or inShowTakenMarks )
+        for extHigh in highExtremes
+            if ( extHigh.HighBarIndex >= minAllowedBar )
+                bool isTaken = extHigh.isTaken()
+                if ( ( not( isTaken ) and inShowUntakenMarks ) or ( isTaken and inShowTakenMarks ) )
+                    string tag = not( isTaken ) ? "BSL" : ( extHigh.IsBroken() ? "Brk" : "Swp" )
+                    color  col = not( isTaken ) ? inTopColor : color.new(inTopColor, 45)
+                    debugLabels.push(label.new(extHigh.HighBarIndex, extHigh.HighPrice, tag, xloc = xloc.bar_index, style = label.style_label_down, color = color(na), textcolor = col, size = size.tiny, text_formatting = text.format_bold))
+
+        for extLow in lowExtremes
+            if ( extLow.LowBarIndex >= minAllowedBar )
+                bool isTaken = extLow.isTaken()
+                if ( ( not( isTaken ) and inShowUntakenMarks ) or ( isTaken and inShowTakenMarks ) )
+                    string tag = not( isTaken ) ? "SSL" : ( extLow.IsBroken() ? "Brk" : "Swp" )
+                    color  col = not( isTaken ) ? inBottomColor : color.new(inBottomColor, 45)
+                    debugLabels.push(label.new(extLow.LowBarIndex, extLow.LowPrice, tag, xloc = xloc.bar_index, style = label.style_label_up, color = color(na), textcolor = col, size = size.tiny, text_formatting = text.format_bold))

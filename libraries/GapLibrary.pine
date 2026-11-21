@@ -1,0 +1,687 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+library("GapLibrary", overlay = true)
+
+
+var int CURRENT_TIMEFRAME_IN_MILLISECONDS = ( timeframe.in_seconds(timeframe.period) * 1000 )
+
+
+//====================================================================
+// ENUMS
+//====================================================================
+
+export enum GapType
+    NWOG = 'New Week Opening Gap'
+    NDOG = 'New Day Opening Gap'
+    FVG  = 'Fair Value Gap'
+    VI   = 'Volume Imbalance'
+
+
+export getAllGapTypes() =>
+    var array<GapType> _AllGapTypes = array.from(
+        GapType.NWOG,
+        GapType.NDOG,
+        GapType.FVG,
+        GapType.VI
+    )
+    _AllGapTypes
+
+
+export method toIntType(GapType this) =>
+    switch this
+        GapType.NWOG => 0
+        GapType.NDOG => 1
+        GapType.FVG  => 2
+        GapType.VI   => 3
+        =>              -1
+
+
+export typeFromInt(int intGapType) =>
+    GapType result = switch intGapType
+        0 => GapType.NWOG
+        1 => GapType.NDOG
+        2 => GapType.FVG
+        3 => GapType.VI
+        =>   na
+    result
+
+
+export method isNewWeekOpeningGap(GapType this) =>
+    ( this == GapType.NWOG )
+
+
+export method isNewDayOpeningGap(GapType this) =>
+    ( this == GapType.NDOG )
+
+
+export method isFairValueGap(GapType this) =>
+    ( this == GapType.FVG )
+
+
+export method isVolumeImbalance(GapType this) =>
+    ( this == GapType.VI )
+
+
+export enum GapPolarity
+    Bullish = 'Bullish'
+    Bearish = 'Bearish'
+
+
+export getAllGapPolarities() =>
+    var array<GapPolarity> _AllGapPolarities = array.from(
+        GapPolarity.Bullish,
+        GapPolarity.Bearish
+    )
+    _AllGapPolarities
+
+
+export method toIntPolarity(GapPolarity this) =>
+    switch this
+        GapPolarity.Bullish => 0
+        GapPolarity.Bearish => 1
+        =>                     -1
+
+
+export polarityFromInt(int intPolarity) =>
+    GapPolarity result = switch intPolarity
+        0 => GapPolarity.Bullish
+        1 => GapPolarity.Bearish
+        =>   na
+    result
+
+
+export method isBullish(GapPolarity this) =>
+    ( this == GapPolarity.Bullish )
+
+
+export method isBearish(GapPolarity this) =>
+    ( this == GapPolarity.Bearish )
+
+
+//====================================================================
+// DATA TYPES
+//====================================================================
+
+export type Gap
+    varip int   IntType            = -1
+    varip bool  IsBullish          = false
+
+    varip int   OpenTime           = 0
+    varip int   BarIndex           = 0
+    varip int   LeftEdgeTime       = 0
+
+    varip float TopPrice           = 0
+    varip float BottomPrice        = 0
+
+    varip bool  IsConfirmed        = false
+    varip bool  IsValid            = true
+
+    varip bool  IsInverted         = false
+    varip int   InvertedAtBarIndex = 0
+    varip int   InvertedAtOpenTime = 0
+
+
+export type GapsHolder
+    varip map<int, Gap> MapGaps           = na
+    varip Gap           LastRegisteredGap = na
+    varip array<Gap>    CachedValues      = na
+    varip bool          IsCacheInSync     = false
+    varip int           MaxSize           = 25
+
+
+export type GapsStorage
+    varip map<int, GapsHolder> MapHolders = na
+
+
+//====================================================================
+// DRAWING TYPES
+//====================================================================
+
+export type Settings
+    color  BullishLineColor            = #089981FF
+    color  BullishFillColor            = #08998126
+    color  BullishInvertedLineColor    = #F23645FF
+    color  BullishInvertedFillColor    = #F2364526
+    color  BullishMitigatedLineColor   = #08998166
+    color  BullishMitigatedFillColor   = #0899811A
+    color  BullishUnconfirmedLineColor = #80808080
+    color  BullishUnconfirmedFillColor = #8080801A
+
+    color  BearishLineColor            = #F23645FF
+    color  BearishFillColor            = #F2364526
+    color  BearishInvertedLineColor    = #089981FF
+    color  BearishInvertedFillColor    = #08998126
+    color  BearishMitigatedLineColor   = #F2364566
+    color  BearishMitigatedFillColor   = #F236451A
+    color  BearishUnconfirmedLineColor = #80808080
+    color  BearishUnconfirmedFillColor = #8080801A
+
+    color  LabelColor                  = #787B86FF
+    bool   ShowLabel                   = true
+
+    int    LineWidth                   = 1
+    string LineStyle                   = line.style_solid
+    string InvertedLineStyle           = line.style_dashed
+    int    MidLineWidth                = 1
+    string MidLineStyle                = line.style_dashed
+    color  MidLineColor                = #80808080
+
+    bool   EnableDistanceFilter        = true
+    float  DistanceAtrMultiplier       = 1.0
+    int    OutOfRangeOffsetBars        = 5
+
+
+export type Drawings
+    Gap              Gap                = na
+    Settings Settings           = na
+    line             TopLine            = na
+    line             BottomLine         = na
+    linefill         LineFill           = na
+    line             MidLine            = na
+    line             InvertedTopLine    = na
+    line             InvertedBottomLine = na
+    linefill         InvertedLineFill   = na
+    label            Label              = na
+    color            LineColor          = na
+    color            FillColor          = na
+    color            InvertedLineColor  = na
+    color            InvertedFillColor  = na
+    color            LabelColor         = na
+    string           LabelText          = na
+
+
+export type DrawingsHolder
+    map<int, Drawings> MapDrawings = na
+    int                   MaxSize     = 4
+
+
+export type DrawingsStorage
+    map<int, DrawingsHolder> MapHolders = na
+
+
+//====================================================================
+// Gap METHODS
+//====================================================================
+
+export method logInfo(Gap this, string timezone = "America/New_York") =>
+    log.info('OT: ' + str.format_time(this.OpenTime, "yyyy-MM-dd HH:mm:ss", timezone) + '  T: ' + str.tostring(this.TopPrice) + '  B: ' + str.tostring(this.BottomPrice))
+
+
+export method setType(Gap this, GapType gapType, bool isBullish) =>
+    this.IntType   := gapType.toIntType()
+    this.IsBullish := isBullish
+
+
+export method isNewWeekOpeningGap(Gap this) =>
+    ( this.IntType == 0 )
+
+
+export method isNewDayOpeningGap(Gap this) =>
+    ( this.IntType == 1 )
+
+
+export method isFairValueGap(Gap this) =>
+    ( this.IntType == 2 )
+
+
+export method isVolumeImbalance(Gap this) =>
+    ( this.IntType == 3 )
+
+
+export method getGapRange(Gap this) =>
+    ( this.TopPrice - this.BottomPrice )
+
+
+export method getMidPrice(Gap this) =>
+    ( ( this.TopPrice + this.BottomPrice ) / 2.0 )
+
+
+export method isPriceInRange(Gap this, float price) =>
+    ( ( price >= this.BottomPrice ) and ( price <= this.TopPrice ) )
+
+
+export method isWithinDistance(Gap this, float currentPrice, float atr, float atrMultiplier) =>
+    bool result = true
+    if ( not( ( atrMultiplier <= 0 ) or ( nz(atr) == 0 ) or this.isPriceInRange(currentPrice) ) )
+        float distanceToTop    = math.abs(currentPrice - this.TopPrice)
+        float distanceToBottom = math.abs(currentPrice - this.BottomPrice)
+        float closestDistance  = math.min(distanceToTop, distanceToBottom)
+        result := ( closestDistance <= ( atr * atrMultiplier ) )
+    result
+
+
+export method markInverted(Gap this, int atBarIndex, int atOpenTime) =>
+    this.IsInverted         := true
+    this.InvertedAtBarIndex := atBarIndex
+    this.InvertedAtOpenTime := atOpenTime
+
+
+//====================================================================
+// GapsHolder METHODS
+//====================================================================
+
+export method clear(GapsHolder this) =>
+    if ( this.MapGaps.size() > 0 )
+        this.MapGaps.clear()
+        this.CachedValues.clear()
+
+    if ( this.MaxSize < 0 )
+        this.MaxSize := 0
+
+    this.LastRegisteredGap := na
+    this.IsCacheInSync     := true
+
+
+export method enforceMaxSize(GapsHolder this) =>
+    if ( this.MaxSize > 0 )
+        int overflow = ( this.MapGaps.size() - this.MaxSize )
+        if ( overflow > 0 )
+            if ( overflow == 1 )
+                for [mapKey, _] in this.MapGaps
+                    this.MapGaps.remove(mapKey)
+                    break
+            else
+                for [index, mapKey] in this.MapGaps.keys()
+                    this.MapGaps.remove(mapKey)
+                    if ( index == ( overflow - 1 ) )
+                        break
+            this.IsCacheInSync := false
+    else
+        this.clear()
+
+
+export method setMaxSize(GapsHolder this, int maxSize) =>
+    this.MaxSize := ( maxSize > 0 ) ? maxSize : 0
+    this.enforceMaxSize()
+
+
+export method registerGap(GapsHolder this, int gapKey, Gap gap) =>
+    Gap existingGap = na
+    if ( ( this.MaxSize > 0 ) and not( na(gap) ) )
+        this.LastRegisteredGap := gap
+        existingGap            := this.MapGaps.put(gapKey, gap)
+        this.IsCacheInSync     := false
+        this.enforceMaxSize()
+    existingGap
+
+
+export method getGap(GapsHolder this, int gapKey) =>
+    this.MapGaps.get(gapKey)
+
+
+export method hasRegisteredGap(GapsHolder this, int gapKey) =>
+    this.MapGaps.contains(gapKey)
+
+
+export method getRegisteredGaps(GapsHolder this) =>
+    if ( not( this.IsCacheInSync ) )
+        this.CachedValues  := this.MapGaps.values()
+        this.IsCacheInSync := true
+    this.CachedValues
+
+
+export method removeGap(GapsHolder this, int gapKey) =>
+    Gap removedGap = this.MapGaps.remove(gapKey)
+    if ( not( na(removedGap) ) )
+        this.IsCacheInSync := false
+        if ( this.MapGaps.size() == 0 )
+            this.LastRegisteredGap := na
+        else if ( removedGap.OpenTime == this.LastRegisteredGap.OpenTime )
+            this.LastRegisteredGap := this.getRegisteredGaps().last()
+    removedGap
+
+
+export method countGaps(GapsHolder this) =>
+    this.MapGaps.size()
+
+
+export method getLastRegisteredGap(GapsHolder this) =>
+    this.LastRegisteredGap
+
+
+export method getLastRegisteredOpenTime(GapsHolder this) =>
+    na(this.LastRegisteredGap) ? 0 : this.LastRegisteredGap.OpenTime
+
+
+export method updateGaps(GapsHolder this, int currentBarIndex, int currentOpenTime, float currentClosePrice) =>
+    array<Gap> registeredGaps = this.getRegisteredGaps()
+    int        gapsCount      = registeredGaps.size()
+
+    for i = 1 to ( ( gapsCount > 0 ) ? gapsCount : na )
+        Gap gap = registeredGaps.get(i - 1)
+        if ( not( gap.IsConfirmed ) )
+            continue
+
+        if ( gap.isNewDayOpeningGap() or gap.isNewWeekOpeningGap() )
+            break
+
+        bool wasInverted = gap.IsInverted
+        if ( gap.IsBullish )
+            if ( not( wasInverted ) and ( currentClosePrice < gap.BottomPrice ) )
+                gap.markInverted(currentBarIndex, currentOpenTime)
+            else if ( wasInverted and ( currentClosePrice > gap.TopPrice ) )
+                this.removeGap(gap.OpenTime)
+        else
+            if ( not( wasInverted ) and ( currentClosePrice > gap.TopPrice ) )
+                gap.markInverted(currentBarIndex, currentOpenTime)
+            else if ( wasInverted and ( currentClosePrice < gap.BottomPrice ) )
+                this.removeGap(gap.OpenTime)
+    true
+
+
+//====================================================================
+// GapsStorage METHODS
+//====================================================================
+
+export getStorageInstance() =>
+    GapsStorage.new(map.new<int, GapsHolder>())
+
+
+export method getGapsHolder(GapsStorage this, int holderKey, bool createIfNotExists = true, int maxSizeIfCreate = 25) =>
+    GapsHolder gapsHolder = this.MapHolders.get(holderKey)
+    if ( na(gapsHolder) and createIfNotExists )
+        gapsHolder := GapsHolder.new(
+            MapGaps           = map.new<int, Gap>(),
+            LastRegisteredGap = na,
+            CachedValues      = array.new<Gap>(),
+            IsCacheInSync     = true
+        )
+        gapsHolder.setMaxSize(maxSizeIfCreate)
+        this.MapHolders.put(holderKey, gapsHolder)
+    gapsHolder
+
+
+//====================================================================
+// Drawings HELPERS & METHODS
+//====================================================================
+
+getLabelTextForGapType(GapType gapType, bool isInverted) =>
+    string baseText = switch gapType
+        GapType.FVG  => isInverted ? "IFVG" : "FVG"
+        GapType.VI   => "VI"
+        GapType.NDOG => "NDOG"
+        GapType.NWOG => "NWOG"
+        =>              ""
+    baseText
+
+
+export method deleteDrawings(Drawings this) =>
+    linefill.delete(this.LineFill)
+    linefill.delete(this.InvertedLineFill)
+    line.delete(this.TopLine)
+    line.delete(this.BottomLine)
+    line.delete(this.InvertedTopLine)
+    line.delete(this.InvertedBottomLine)
+    line.delete(this.MidLine)
+    label.delete(this.Label)
+    this.LineFill           := na
+    this.InvertedLineFill   := na
+    this.TopLine            := na
+    this.BottomLine         := na
+    this.InvertedTopLine    := na
+    this.InvertedBottomLine := na
+    this.MidLine            := na
+    this.Label              := na
+
+
+// Gap.IsBullish permanently preserves the ORIGINAL creation polarity (never flipped on inversion).
+method computeStateColors(Drawings this, GapType gapType) =>
+    Settings settings    = this.Settings
+    Gap              gap         = this.Gap
+    bool             isOrigBull  = gap.IsBullish
+    bool             isInverted  = gap.IsInverted
+    bool             isConfirmed = gap.IsConfirmed
+
+    color lineCol          = na
+    color fillCol          = na
+    color mitigatedLineCol = na
+    color mitigatedFillCol = na
+
+    if ( not( isConfirmed ) )
+        lineCol := isOrigBull ? settings.BullishUnconfirmedLineColor : settings.BearishUnconfirmedLineColor
+        fillCol := isOrigBull ? settings.BullishUnconfirmedFillColor : settings.BearishUnconfirmedFillColor
+    else if ( isInverted )
+        lineCol          := isOrigBull ? settings.BullishInvertedLineColor  : settings.BearishInvertedLineColor
+        fillCol          := isOrigBull ? settings.BullishInvertedFillColor  : settings.BearishInvertedFillColor
+        mitigatedLineCol := isOrigBull ? settings.BullishMitigatedLineColor : settings.BearishMitigatedLineColor
+        mitigatedFillCol := isOrigBull ? settings.BullishMitigatedFillColor : settings.BearishMitigatedFillColor
+    else
+        lineCol := isOrigBull ? settings.BullishLineColor : settings.BearishLineColor
+        fillCol := isOrigBull ? settings.BullishFillColor : settings.BearishFillColor
+
+    string labelText = isConfirmed ? getLabelTextForGapType(gapType, isInverted) : "👁"
+    [lineCol, fillCol, mitigatedLineCol, mitigatedFillCol, settings.LabelColor, labelText]
+
+
+method computeRightEdge(Drawings this, GapType gapType, float currentPrice, float atr) =>
+    Settings settings = this.Settings
+    Gap              gap      = this.Gap
+
+    bool isOpeningGap = ( gapType.isNewDayOpeningGap() or gapType.isNewWeekOpeningGap() )
+    bool inRange      = ( isOpeningGap or not( settings.EnableDistanceFilter ) or gap.isWithinDistance(currentPrice, atr, settings.DistanceAtrMultiplier) )
+
+    int rightEdge = time
+    if ( not( inRange ) )
+        int anchor  = gap.IsInverted ? gap.InvertedAtOpenTime : gap.LeftEdgeTime
+        int retract = ( anchor + ( settings.OutOfRangeOffsetBars * CURRENT_TIMEFRAME_IN_MILLISECONDS ) )
+        rightEdge  := math.min(retract, time)
+    rightEdge
+
+
+export method buildDrawings(Drawings this, GapType gapType, float currentPrice, float atr) =>
+    if ( not( na(this.Gap) ) )
+        Settings settings = this.Settings
+        Gap              gap      = this.Gap
+        float            midPrice = ( ( gap.TopPrice + gap.BottomPrice ) / 2.0 )
+        [lineCol, fillCol, mitigatedLineCol, mitigatedFillCol, labelCol, labelText] = this.computeStateColors(gapType)
+
+        bool  isInverted  = ( gap.IsInverted and gap.IsConfirmed )
+        int   rightEdge   = this.computeRightEdge(gapType, currentPrice, atr)
+        int   labelX      = ( rightEdge + CURRENT_TIMEFRAME_IN_MILLISECONDS )
+        int   leftRight   = isInverted ? gap.InvertedAtOpenTime : rightEdge
+        color leftLineCol = isInverted ? mitigatedLineCol       : lineCol
+        color leftFillCol = isInverted ? mitigatedFillCol       : fillCol
+
+        this.TopLine    := line.new(gap.LeftEdgeTime, gap.TopPrice,    leftRight, gap.TopPrice,    xloc = xloc.bar_time, color = leftLineCol,           style = settings.LineStyle,    width = settings.LineWidth)
+        this.BottomLine := line.new(gap.LeftEdgeTime, gap.BottomPrice, leftRight, gap.BottomPrice, xloc = xloc.bar_time, color = leftLineCol,           style = settings.LineStyle,    width = settings.LineWidth)
+        this.LineFill   := linefill.new(this.TopLine, this.BottomLine, color = leftFillCol)
+        this.MidLine    := line.new(gap.LeftEdgeTime, midPrice,        rightEdge, midPrice,        xloc = xloc.bar_time, color = settings.MidLineColor, style = settings.MidLineStyle, width = settings.MidLineWidth)
+
+        if ( isInverted )
+            this.InvertedTopLine    := line.new(gap.InvertedAtOpenTime, gap.TopPrice,    rightEdge, gap.TopPrice,    xloc = xloc.bar_time, color = lineCol, style = settings.InvertedLineStyle, width = settings.LineWidth)
+            this.InvertedBottomLine := line.new(gap.InvertedAtOpenTime, gap.BottomPrice, rightEdge, gap.BottomPrice, xloc = xloc.bar_time, color = lineCol, style = settings.InvertedLineStyle, width = settings.LineWidth)
+            this.InvertedLineFill   := linefill.new(this.InvertedTopLine, this.InvertedBottomLine, color = fillCol)
+
+        if ( settings.ShowLabel )
+            this.Label := label.new(labelX, midPrice, text = labelText, xloc = xloc.bar_time, style = label.style_label_center, color = color.new(color.black, 100), textcolor = labelCol, size = size.tiny, text_formatting = text.format_bold)
+
+        this.LineColor         := leftLineCol
+        this.FillColor         := leftFillCol
+        this.InvertedLineColor := isInverted ? lineCol : na
+        this.InvertedFillColor := isInverted ? fillCol : na
+        this.LabelColor        := labelCol
+        this.LabelText         := labelText
+
+
+export method updateDrawings(Drawings this, GapType gapType, float currentPrice, float atr) =>
+    if ( not( na(this.Gap) ) )
+        Settings settings = this.Settings
+        Gap              gap      = this.Gap
+        float            midPrice = ( ( gap.TopPrice + gap.BottomPrice ) / 2.0 )
+        [lineCol, fillCol, mitigatedLineCol, mitigatedFillCol, labelCol, labelText] = this.computeStateColors(gapType)
+
+        bool isInverted      = ( gap.IsInverted and gap.IsConfirmed )
+        bool needsConversion = ( isInverted and na(this.InvertedTopLine) )
+        int  rightEdge       = this.computeRightEdge(gapType, currentPrice, atr)
+        int  labelX          = ( rightEdge + CURRENT_TIMEFRAME_IN_MILLISECONDS )
+
+        if ( needsConversion )
+            this.TopLine.set_xy2(gap.InvertedAtOpenTime, gap.TopPrice)
+            this.BottomLine.set_xy2(gap.InvertedAtOpenTime, gap.BottomPrice)
+            this.TopLine.set_color(mitigatedLineCol)
+            this.BottomLine.set_color(mitigatedLineCol)
+            this.LineFill.set_color(mitigatedFillCol)
+            this.LineColor := mitigatedLineCol
+            this.FillColor := mitigatedFillCol
+
+            this.InvertedTopLine    := line.new(gap.InvertedAtOpenTime, gap.TopPrice,    rightEdge, gap.TopPrice,    xloc = xloc.bar_time, color = lineCol, style = settings.InvertedLineStyle, width = settings.LineWidth)
+            this.InvertedBottomLine := line.new(gap.InvertedAtOpenTime, gap.BottomPrice, rightEdge, gap.BottomPrice, xloc = xloc.bar_time, color = lineCol, style = settings.InvertedLineStyle, width = settings.LineWidth)
+            this.InvertedLineFill   := linefill.new(this.InvertedTopLine, this.InvertedBottomLine, color = fillCol)
+            this.InvertedLineColor := lineCol
+            this.InvertedFillColor := fillCol
+
+        if ( isInverted )
+            this.InvertedTopLine.set_xy2(rightEdge, gap.TopPrice)
+            this.InvertedBottomLine.set_xy2(rightEdge, gap.BottomPrice)
+        else
+            this.TopLine.set_xy2(rightEdge, gap.TopPrice)
+            this.BottomLine.set_xy2(rightEdge, gap.BottomPrice)
+
+        this.MidLine.set_xy2(rightEdge, midPrice)
+        if ( not( na(this.Label) ) )
+            this.Label.set_xy(labelX, midPrice)
+
+        if ( isInverted )
+            if ( this.InvertedLineColor != lineCol )
+                this.InvertedTopLine.set_color(lineCol)
+                this.InvertedBottomLine.set_color(lineCol)
+                this.InvertedLineColor := lineCol
+            if ( this.InvertedFillColor != fillCol )
+                this.InvertedLineFill.set_color(fillCol)
+                this.InvertedFillColor := fillCol
+        else
+            if ( this.LineColor != lineCol )
+                this.TopLine.set_color(lineCol)
+                this.BottomLine.set_color(lineCol)
+                this.LineColor := lineCol
+            if ( this.FillColor != fillCol )
+                this.LineFill.set_color(fillCol)
+                this.FillColor := fillCol
+
+        if ( not( na(this.Label) ) )
+            if ( this.LabelColor != labelCol )
+                this.Label.set_textcolor(labelCol)
+                this.LabelColor := labelCol
+            if ( this.LabelText != labelText )
+                this.Label.set_text(labelText)
+                this.LabelText := labelText
+
+
+//====================================================================
+// DrawingsHolder & DrawingsStorage METHODS
+//====================================================================
+
+export method clear(DrawingsHolder this) =>
+    if ( this.MapDrawings.size() > 0 )
+        for [_, drawing] in this.MapDrawings
+            if ( not( na(drawing) ) )
+                drawing.deleteDrawings()
+        this.MapDrawings.clear()
+
+
+export method enforceMaxSize(DrawingsHolder this, int maxSize) =>
+    if ( maxSize > 0 )
+        int overflow = ( this.MapDrawings.size() - maxSize )
+        if ( overflow > 0 )
+            if ( overflow == 1 )
+                for [mapKey, _] in this.MapDrawings
+                    Drawings evicted = this.MapDrawings.remove(mapKey)
+                    if ( not( na(evicted) ) )
+                        evicted.deleteDrawings()
+                    break
+            else
+                for [index, mapKey] in this.MapDrawings.keys()
+                    Drawings evicted = this.MapDrawings.remove(mapKey)
+                    if ( not( na(evicted) ) )
+                        evicted.deleteDrawings()
+                    if ( index == ( overflow - 1 ) )
+                        break
+    else
+        this.clear()
+
+
+export method setMaxSize(DrawingsHolder this, int maxSize) =>
+    this.MaxSize := ( maxSize > 0 ) ? maxSize : 0
+    this.enforceMaxSize(this.MaxSize)
+
+
+export method removeDrawings(DrawingsHolder this, int drawingKey) =>
+    Drawings oldDrawings = this.MapDrawings.remove(drawingKey)
+    if ( not( na(oldDrawings) ) )
+        oldDrawings.deleteDrawings()
+    oldDrawings
+
+
+export method registerDrawings(DrawingsHolder this, int drawingKey, Drawings drawings) =>
+    Drawings oldDrawings = na
+    if ( ( this.MaxSize > 0 ) and not( na(drawings) ) )
+        oldDrawings := this.MapDrawings.put(drawingKey, drawings)
+        if ( not( na(oldDrawings) ) )
+            oldDrawings.deleteDrawings()
+        this.enforceMaxSize(this.MaxSize)
+    else if ( not( na(drawings) ) )
+        drawings.deleteDrawings()
+    oldDrawings
+
+
+export method synchronizeDrawings(DrawingsHolder this, GapsHolder gapsHolder, GapType gapType, Settings settings, float currentPrice, float atr) =>
+    if ( this.MaxSize <= 0 )
+        this.clear()
+    else
+        for drawingKey in this.MapDrawings.keys()
+            Drawings drawing  = this.MapDrawings.get(drawingKey)
+            bool gapExists       = ( not( na(gapsHolder) ) and gapsHolder.MapGaps.contains(drawingKey) )
+            bool isDummy         = ( not( na(drawing.Gap) ) and not( drawing.Gap.IsConfirmed ) )
+            bool keepRealtimeDum = ( isDummy and not( barstate.isconfirmed ) )
+            if ( not( gapExists ) and not( keepRealtimeDum ) )
+                this.removeDrawings(drawingKey)
+
+        if ( not( na(gapsHolder) ) )
+            array<Gap> allGaps   = gapsHolder.getRegisteredGaps()
+            int        totalGaps = allGaps.size()
+            int        startIdx  = math.max(0, totalGaps - this.MaxSize)
+
+            for drawingKey in this.MapDrawings.keys()
+                Drawings existingD = this.MapDrawings.get(drawingKey)
+                bool isRealtimeDummy  = ( not( na(existingD.Gap) ) and not( existingD.Gap.IsConfirmed ) and not( barstate.isconfirmed ) )
+                if ( not( isRealtimeDummy ) )
+                    bool inRecentSlice = false
+                    for i = startIdx to ( ( totalGaps > 0 ) ? ( totalGaps - 1 ) : na )
+                        if ( allGaps.get(i).OpenTime == drawingKey )
+                            inRecentSlice := true
+                            break
+                    if ( not( inRecentSlice ) )
+                        this.removeDrawings(drawingKey)
+
+            for i = startIdx to ( ( totalGaps > 0 ) ? ( totalGaps - 1 ) : na )
+                Gap gap     = allGaps.get(i)
+                int k       = gap.OpenTime
+                Drawings drawing = this.MapDrawings.get(k)
+                if ( na(drawing) )
+                    this.enforceMaxSize(this.MaxSize - 1)
+                    drawing := Drawings.new(Gap = gap, Settings = settings)
+                    drawing.buildDrawings(gapType, currentPrice, atr)
+                    this.MapDrawings.put(k, drawing)
+                    true
+                else
+                    drawing.Gap      := gap
+                    drawing.Settings := settings
+                    drawing.updateDrawings(gapType, currentPrice, atr)
+                    true
+
+
+export getDrawingsStorageInstance() =>
+    DrawingsStorage.new(MapHolders = map.new<int, DrawingsHolder>())
+
+
+export method getDrawingsHolder(DrawingsStorage this, int holderKey, bool createIfNotExists = true, int maxSizeIfCreate = 4) =>
+    DrawingsHolder drawingsHolder = this.MapHolders.get(holderKey)
+    if ( na(drawingsHolder) and createIfNotExists )
+        drawingsHolder := DrawingsHolder.new(
+            MapDrawings = map.new<int, Drawings>(),
+            MaxSize     = maxSizeIfCreate
+        )
+        this.MapHolders.put(holderKey, drawingsHolder)
+    drawingsHolder

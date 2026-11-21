@@ -1,0 +1,150 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PaMihChe
+
+//@version=6
+indicator("Engine Test Harness", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+
+import MihChe/HelperLibrary/1    as HelperLib
+import MihChe/AssetLibrary/1     as AssetLib
+import MihChe/TimeFrameLibrary/1 as TimeFrameLib
+import MihChe/CandleLibrary/1    as CandleLib
+import MihChe/SwingLibrary/1     as SwingLib
+import MihChe/GapLibrary/1       as GapLib
+import MihChe/SmtLibrary/1       as SmtLib
+import MihChe/EngineLibrary/1    as EngineLib
+
+
+//====================================================================
+// INPUTS
+//====================================================================
+
+bool   inEnableSecond       = input.bool(true,      "Enable Second Asset",       group = "Assets")
+bool   inEnableThird        = input.bool(true,      "Enable Third Asset",        group = "Assets")
+string inCustomSecondTicker = input.string("",      "Custom Second Ticker",      group = "Assets")
+string inCustomThirdTicker  = input.string("",      "Custom Third Ticker",       group = "Assets")
+
+int    inMaxBullishSmts     = input.int(5,          "Max Bullish SMTs",          minval = 0, maxval = 5, group = "SMT Settings")
+int    inMaxBearishSmts     = input.int(5,          "Max Bearish SMTs",          minval = 0, maxval = 5, group = "SMT Settings")
+bool   inShowHtfSmt         = input.bool(true,      "Show HTF SMTs",             group = "SMT Settings")
+color  inUnconfirmedColor   = input.color(#FF9800FF, "Unconfirmed SMT Color",    group = "SMT Settings")
+
+bool   inShowPspDot         = input.bool(true,      "Show PSP Dot",              group = "PSP Settings")
+color  inPspDotColor        = input.color(#2962FFFF, "PSP Dot Color",            group = "PSP Settings")
+bool   inShowPspBarColor    = input.bool(true,      "Color PSP Candle",          group = "PSP Settings")
+bool   inPreviewLivePsp     = input.bool(false,     "Preview Live Realtime PSP", group = "PSP Settings")
+color  inBullPspBarColor    = input.color(#00C853FF, "Bullish PSP Candle",       group = "PSP Settings")
+color  inBearPspBarColor    = input.color(#FF1744FF, "Bearish PSP Candle",       group = "PSP Settings")
+
+const string TIMEZONE_NY = "America/New_York"
+
+
+//====================================================================
+// 1. ENGINE & SMT DRAWINGS SETTINGS INITIALIZATION
+//====================================================================
+
+string resolvedSecondTicker = ( str.length(inCustomSecondTicker) > 0 ) ? inCustomSecondTicker : na
+string resolvedThirdTicker  = ( str.length(inCustomThirdTicker)  > 0 ) ? inCustomThirdTicker  : na
+
+var EngineLib.Settings EngineSettings = EngineLib.getSettingsInstance(
+    enableSecondAsset  = inEnableSecond,
+    enableThirdAsset   = inEnableThird,
+    customSecondTicker = resolvedSecondTicker,
+    customThirdTicker  = resolvedThirdTicker,
+    maxBullishSmts     = inMaxBullishSmts,
+    maxBearishSmts     = inMaxBearishSmts,
+    previewLivePsp     = inPreviewLivePsp
+)
+
+var EngineLib.Engine Engine = EngineLib.getEngineInstance(EngineSettings)
+
+var SmtLib.Settings BullishSmtSettings = SmtLib.Settings.new(
+    ShowLine             = true,
+    LineColor            = #089981FF,
+    UnconfirmedColor     = inUnconfirmedColor,
+    LineStyle            = SmtLib.LineStyleType.Solid,
+    UnconfirmedLineStyle = SmtLib.LineStyleType.Solid,
+    LineWidth            = 2,
+    ShowLabel            = true,
+    LabelColor           = #FFFFFF00,
+    LabelTextColor       = #089981FF,
+    ShowPspLabel         = inShowPspDot,
+    PspTextColor         = inPspDotColor
+)
+
+var SmtLib.Settings BearishSmtSettings = SmtLib.Settings.new(
+    ShowLine             = true,
+    LineColor            = #F23645FF,
+    UnconfirmedColor     = inUnconfirmedColor,
+    LineStyle            = SmtLib.LineStyleType.Solid,
+    UnconfirmedLineStyle = SmtLib.LineStyleType.Solid,
+    LineWidth            = 2,
+    ShowLabel            = true,
+    LabelColor           = #FFFFFF00,
+    LabelTextColor       = #F23645FF,
+    ShowPspLabel         = inShowPspDot,
+    PspTextColor         = inPspDotColor
+)
+
+if ( barstate.isfirst )
+    Engine.initializeTimeFrames(inShowHtfSmt)
+
+
+//====================================================================
+// 2. RUN DATA COLLECTION & SMT SYNCHRONIZATION
+//====================================================================
+
+plot(close, display = display.none)
+
+Engine.startMonitoringAssets()
+Engine.synchronizeSmtDrawings(BullishSmtSettings, BearishSmtSettings)
+
+barcolor(inShowPspBarColor ? Engine.getPspBarColor(inBullPspBarColor, inBearPspBarColor)  : na, offset = -1, editable = false, show_last = 3)
+barcolor(inShowPspBarColor ? Engine.getCurrentBarPspColor(inBullPspBarColor, inBearPspBarColor) : na, editable = false, show_last = 1)
+
+
+//====================================================================
+// 3. DIAGNOSTIC LOGS (ONCE ON LAST BAR)
+//====================================================================
+
+if ( barstate.islast )
+    varip bool hasLoggedSmt = false
+    if ( not( hasLoggedSmt ) )
+        hasLoggedSmt := true
+
+        array<string> monTfKeys = Engine.Settings.MonitoredTimeFramesMap.keys()
+        array<string> smtTfKeys = Engine.Settings.SmtMonitoredTimeFrames.keys()
+
+        log.info("========== [TIMEFRAME MAPS] ==========")
+        log.info("MonitoredTFs ({0}): [{1}]", str.tostring(monTfKeys.size()), monTfKeys.join(" -> "))
+        log.info("SmtMonitoredTFs ({0}): [{1}]", str.tostring(smtTfKeys.size()), smtTfKeys.join(" -> "))
+
+        array<SmtLib.SmtDisplayItem> topBull = Engine.getTopActiveSmts(SmtLib.SmtDirection.Bullish)
+        array<SmtLib.SmtDisplayItem> topBear = Engine.getTopActiveSmts(SmtLib.SmtDirection.Bearish)
+
+        log.info("========== [LAST {0} SELECTED BULLISH SMTs] ==========", str.tostring(Engine.Settings.MaxBullishSmts))
+        for [idx, item] in topBull
+            log.info("   #{0}: [{1}] Conf={2} | StartBI={3} ({4}, PSP={5}) -> EndBI={6} ({7}, PSP={8})",
+                str.tostring(idx + 1),
+                na(item.LabelText) ? "SQ (no label)" : item.LabelText,
+                str.tostring(item.IsConfirmed),
+                str.tostring(item.StartBarIndex),
+                str.tostring(item.MainStartPrice),
+                str.tostring(item.StartIsPSP),
+                str.tostring(item.EndBarIndex),
+                str.tostring(item.MainEndPrice),
+                str.tostring(item.EndIsPSP)
+            )
+
+        log.info("========== [LAST {0} SELECTED BEARISH SMTs] ==========", str.tostring(Engine.Settings.MaxBearishSmts))
+        for [idx, item] in topBear
+            log.info("   #{0}: [{1}] Conf={2} | StartBI={3} ({4}, PSP={5}) -> EndBI={6} ({7}, PSP={8})",
+                str.tostring(idx + 1),
+                na(item.LabelText) ? "SQ (no label)" : item.LabelText,
+                str.tostring(item.IsConfirmed),
+                str.tostring(item.StartBarIndex),
+                str.tostring(item.MainStartPrice),
+                str.tostring(item.StartIsPSP),
+                str.tostring(item.EndBarIndex),
+                str.tostring(item.MainEndPrice),
+                str.tostring(item.EndIsPSP)
+            )
