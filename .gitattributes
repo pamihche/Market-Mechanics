@@ -1,0 +1,4 @@
+# Normalize line endings and enable syntax highlighting for Pine Script on GitHub
+# (-linguist-detectable prevents GitHub from mislabeling the repo as TypeScript)
+*.pine text eol=lf linguist-language=TypeScript -linguist-detectable
+*.md   text eol=lf
