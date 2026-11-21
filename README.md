@@ -1,5 +1,8 @@
 # Market-Mechanics
 
+![Pine Script v6](https://img.shields.io/badge/Pine_Script-v6-2962FF?style=flat-square&logo=tradingview&logoColor=white)
+![Platform](https://img.shields.io/badge/Platform-TradingView-131722?style=flat-square&logo=tradingview&logoColor=white)
+
 Quantitative market-structure libraries and precision Pine Script v6 indicators
 for time-synchronized intermarket divergence, liquidity, and price delivery.
 
