@@ -31,6 +31,9 @@ orchestrated by a central multi-asset engine:
 
 ```text
 Market-Mechanics/
+├── indicators/                 # Production Indicators
+│   └── Parallax.pine           # Intermarket divergence & PSP indicator
+│
 ├── libraries/                  # Core Pine Script v6 Libraries (dependency order)
 │   ├── HelperLibrary.pine      # Composite keys, lookback scopes & utilities
 │   ├── AssetLibrary.pine       # Triad / pair auto-detection & symbol resolution
@@ -42,9 +45,6 @@ Market-Mechanics/
 │   ├── SmtLibrary.pine         # Divergence candidates, ranking & rendering
 │   └── EngineLibrary.pine      # Multi-asset, multi-timeframe orchestrator
 │
-├── indicators/                 # Production Indicators
-│   └── Parallax.pine           # Intermarket divergence & PSP indicator
-│
 ├── sandbox/                    # Test harnesses & R&D prototypes
 └── VERSIONS.md                 # Published TradingView version registry
 ```
@@ -52,6 +52,14 @@ Market-Mechanics/
 ---
 
 ## Core Modules
+
+### Indicators (`indicators/`)
+
+- **`Parallax`**
+  Flagship intermarket divergence and Precision Swing Point (`PSP`) indicator
+  powered by `EngineLibrary`. Reveals structural cracks in correlation across
+  paired and triad instruments across aligned chart and higher fractal
+  timeframes.
 
 ### Libraries (`libraries/`)
 
@@ -105,14 +113,6 @@ Market-Mechanics/
   synchronized runtime snapshots per timeframe, drives real-time candle/swing/
   gap/divergence state machines, and ranks active non-crossing divergences for
   display.
-
-### Indicators (`indicators/`)
-
-- **`Parallax`**
-  Flagship intermarket divergence and Precision Swing Point (`PSP`) indicator
-  powered by `EngineLibrary`. Reveals structural cracks in correlation across
-  paired and triad instruments across aligned chart and higher fractal
-  timeframes.
 
 ---
 
