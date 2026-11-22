@@ -22,48 +22,54 @@ const string GRP_ASSETS      = "Correlated Assets"
 const string GRP_DIVERGENCES = "Divergences"
 const string GRP_PSP         = "Precision Swing Point (PSP)"
 
-const string TT_MASTER       = "Master switch for Parallax calculations/drawings and aligned higher-timeframe divergence monitoring."
-const string TT_ASSETS       = "Leave symbol empty to auto-detect the correlated triad or pair, or select a custom ticker override."
-const string TT_MAX_DIV      = "Maximum active non-crossing bullish and bearish divergences displayed simultaneously (0 to 5 per side)."
-const string TT_UNCONF       = "Styling applied to divergences still forming inside an unconfirmed higher-timeframe or live candle."
-const string TT_PSP_ROW      = "Marks divergence vertices with opposing cross-asset candle polarity; Live Intrabar previews polarity before bar close."
-const string TT_PSP_BARS     = "Highlights recent chart candles that print a Precision Swing Point at an active divergence endpoint."
+const string TT_ENABLE       = "Master switch for all Parallax calculations and chart drawings."
+const string TT_HTF          = "Monitors aligned higher fractal timeframes alongside the chart timeframe."
+const string TT_ASSETS       = "Auto detects the correlated triad or pair; switch to Custom to override with a manually selected symbol."
+const string TT_MAX_DIV      = "Maximum active non-crossing bullish (left) and bearish (right) divergences displayed simultaneously (0 to 5)."
+const string TT_CONF         = "Confirmed divergence line style and line width (1 to 4)."
+const string TT_UNCONF       = "Line style and color applied to divergences still forming inside an unconfirmed higher-timeframe or live candle."
+const string TT_PSP_DOT      = "Marks divergence vertices where correlated instruments closed with opposing candle polarity."
+const string TT_PSP_BARS     = "Highlights recent chart candles (bullish left, bearish right) that print a Precision Swing Point at an active divergence endpoint."
+const string TT_LIVE_PSP     = "Evaluates cross-asset candle polarity on the live unconfirmed bar before bar close."
 
 
 //====================================================================
 // INPUTS
 //====================================================================
 
-// Master Controls (Top Row)
-bool inEnableIndicator = input.bool(true, "Enable Parallax", inline = "master")
-bool inShowHtf         = input.bool(true, "HTF Divergences", inline = "master", tooltip = TT_MASTER, active = inEnableIndicator)
+// Master Controls
+bool inEnableIndicator = input.bool(true, "Enable Parallax", tooltip = TT_ENABLE)
+bool inShowHtf         = input.bool(true, "HTF Divergences", tooltip = TT_HTF, active = inEnableIndicator)
 
 // 1. Correlated Assets
-bool   inEnableSecond       = input.bool(true,   "Second Asset", inline = "asset2", group = GRP_ASSETS, active = inEnableIndicator)
-string inCustomSecondSymbol = input.symbol("",   "",             inline = "asset2", group = GRP_ASSETS, tooltip = TT_ASSETS, active = ( inEnableIndicator and inEnableSecond ))
+bool   inEnableSecond       = input.bool(true,     "Second Asset",                inline = "asset2", group = GRP_ASSETS, active = inEnableIndicator)
+string inSecondMode         = input.string("Auto", "", options = ["Auto", "Custom"], inline = "asset2", group = GRP_ASSETS, active = ( inEnableIndicator and inEnableSecond ))
+string inCustomSecondSymbol = input.symbol("",     "",                            inline = "asset2", group = GRP_ASSETS, tooltip = TT_ASSETS, active = ( inEnableIndicator and inEnableSecond and ( inSecondMode == "Custom" ) ))
 
-bool   inEnableThird        = input.bool(true,   "Third Asset",  inline = "asset3", group = GRP_ASSETS, active = inEnableIndicator)
-string inCustomThirdSymbol  = input.symbol("",   "",             inline = "asset3", group = GRP_ASSETS, tooltip = TT_ASSETS, active = ( inEnableIndicator and inEnableThird ))
+bool   inEnableThird        = input.bool(true,     "Third Asset",                 inline = "asset3", group = GRP_ASSETS, active = inEnableIndicator)
+string inThirdMode          = input.string("Auto", "", options = ["Auto", "Custom"], inline = "asset3", group = GRP_ASSETS, active = ( inEnableIndicator and inEnableThird ))
+string inCustomThirdSymbol  = input.symbol("",     "",                            inline = "asset3", group = GRP_ASSETS, tooltip = TT_ASSETS, active = ( inEnableIndicator and inEnableThird and ( inThirdMode == "Custom" ) ))
 
 // 2. Divergences
-int                  inMaxBullish       = input.int(5,                           "Max Bullish", minval = 0, maxval = 5, inline = "maxDiv",    group = GRP_DIVERGENCES, active = inEnableIndicator)
-int                  inMaxBearish       = input.int(5,                           "Max Bearish", minval = 0, maxval = 5, inline = "maxDiv",    group = GRP_DIVERGENCES, tooltip = TT_MAX_DIV, active = inEnableIndicator)
-bool                 inShowLabels       = input.bool(true,                       "Labels",                              inline = "divCols",   group = GRP_DIVERGENCES, active = inEnableIndicator)
-color                inBullishColor     = input.color(#089981FF,                 "Bull",                                inline = "divCols",   group = GRP_DIVERGENCES, active = inEnableIndicator)
-color                inBearishColor     = input.color(#F23645FF,                 "Bear",                                inline = "divCols",   group = GRP_DIVERGENCES, active = inEnableIndicator)
-SmtLib.LineStyleType inConfirmedStyle   = input.enum(SmtLib.LineStyleType.Solid, "Confirmed",                           inline = "confStyle", group = GRP_DIVERGENCES, active = inEnableIndicator)
-int                  inLineWidth        = input.int(2,                           "Width",       minval = 1, maxval = 4, inline = "confStyle", group = GRP_DIVERGENCES, active = inEnableIndicator)
-SmtLib.LineStyleType inUnconfirmedStyle = input.enum(SmtLib.LineStyleType.Solid, "Unconfirmed",                         inline = "unconfSt",  group = GRP_DIVERGENCES, active = inEnableIndicator)
-color                inUnconfirmedColor = input.color(#FF9800FF,                 "",                                    inline = "unconfSt",  group = GRP_DIVERGENCES, tooltip = TT_UNCONF, active = inEnableIndicator)
+int                  inMaxBullish       = input.int(5,                           "Max Bull / Bear",           minval = 0, maxval = 5, inline = "maxDiv",    group = GRP_DIVERGENCES, active = inEnableIndicator)
+int                  inMaxBearish       = input.int(5,                           "",                          minval = 0, maxval = 5, inline = "maxDiv",    group = GRP_DIVERGENCES, tooltip = TT_MAX_DIV, active = inEnableIndicator)
+bool                 inShowLabels       = input.bool(true,                       "Show Labels (Bull / Bear)",                         inline = "divCols",   group = GRP_DIVERGENCES, active = inEnableIndicator)
+color                inBullishColor     = input.color(#089981FF,                 "",                                                  inline = "divCols",   group = GRP_DIVERGENCES, active = inEnableIndicator)
+color                inBearishColor     = input.color(#F23645FF,                 "",                                                  inline = "divCols",   group = GRP_DIVERGENCES, active = inEnableIndicator)
+SmtLib.LineStyleType inConfirmedStyle   = input.enum(SmtLib.LineStyleType.Solid, "Confirmed Line",                                    inline = "confStyle", group = GRP_DIVERGENCES, active = inEnableIndicator)
+int                  inLineWidth        = input.int(2,                           "",                          minval = 1, maxval = 4, inline = "confStyle", group = GRP_DIVERGENCES, tooltip = TT_CONF, active = inEnableIndicator)
+SmtLib.LineStyleType inUnconfirmedStyle = input.enum(SmtLib.LineStyleType.Solid, "Unconfirmed Line",                                  inline = "unconfSt",  group = GRP_DIVERGENCES, active = inEnableIndicator)
+color                inUnconfirmedColor = input.color(#FF9800FF,                 "",                                                  inline = "unconfSt",  group = GRP_DIVERGENCES, tooltip = TT_UNCONF, active = inEnableIndicator)
 
 // 3. Precision Swing Point (PSP)
-bool  inShowPspDot      = input.bool(true,       "Marker (◉)",    inline = "pspDot",  group = GRP_PSP, active = inEnableIndicator)
-color inPspDotColor     = input.color(#2962FFFF, "",              inline = "pspDot",  group = GRP_PSP, active = ( inEnableIndicator and inShowPspDot ))
-bool  inPreviewLivePsp  = input.bool(false,      "Live Intrabar", inline = "pspDot",  group = GRP_PSP, tooltip = TT_PSP_ROW, active = inEnableIndicator)
+bool  inShowPspDot      = input.bool(true,       "Show Marker (◉)",             inline = "pspDot",  group = GRP_PSP, active = inEnableIndicator)
+color inPspDotColor     = input.color(#9c27b0, "",                            inline = "pspDot",  group = GRP_PSP, tooltip = TT_PSP_DOT, active = ( inEnableIndicator and inShowPspDot ))
 
-bool  inShowPspBarColor = input.bool(true,       "Color Candles", inline = "pspBars", group = GRP_PSP, active = inEnableIndicator)
-color inBullPspBarColor = input.color(#00C853FF, "Bull",          inline = "pspBars", group = GRP_PSP, active = ( inEnableIndicator and inShowPspBarColor ))
-color inBearPspBarColor = input.color(#FF1744FF, "Bear",          inline = "pspBars", group = GRP_PSP, tooltip = TT_PSP_BARS, active = ( inEnableIndicator and inShowPspBarColor ))
+bool  inShowPspBarColor = input.bool(true,       "Color Candles (Bull / Bear)", inline = "pspBars", group = GRP_PSP, active = inEnableIndicator)
+color inBullPspBarColor = input.color(#00C853FF, "",                            inline = "pspBars", group = GRP_PSP, active = ( inEnableIndicator and inShowPspBarColor ))
+color inBearPspBarColor = input.color(#FF1744FF, "",                            inline = "pspBars", group = GRP_PSP, tooltip = TT_PSP_BARS, active = ( inEnableIndicator and inShowPspBarColor ))
+
+bool  inPreviewLivePsp  = input.bool(false,      "Preview Live Intrabar",                           group = GRP_PSP, tooltip = TT_LIVE_PSP, active = inEnableIndicator)
 
 
 //====================================================================
@@ -72,8 +78,8 @@ color inBearPspBarColor = input.color(#FF1744FF, "Bear",          inline = "pspB
 
 string trimmedSecondSymbol  = str.trim(inCustomSecondSymbol)
 string trimmedThirdSymbol   = str.trim(inCustomThirdSymbol)
-string resolvedSecondTicker = ( str.length(trimmedSecondSymbol) > 0 ) ? trimmedSecondSymbol : na
-string resolvedThirdTicker  = ( str.length(trimmedThirdSymbol)  > 0 ) ? trimmedThirdSymbol  : na
+string resolvedSecondTicker = ( ( inSecondMode == "Custom" ) and ( str.length(trimmedSecondSymbol) > 0 ) ) ? trimmedSecondSymbol : na
+string resolvedThirdTicker  = ( ( inThirdMode  == "Custom" ) and ( str.length(trimmedThirdSymbol)  > 0 ) ) ? trimmedThirdSymbol  : na
 
 var EngineLib.Settings EngineSettings = EngineLib.getSettingsInstance(
     enableSecondAsset  = inEnableSecond,
@@ -132,3 +138,55 @@ if ( inEnableIndicator )
 bool activePspBarColor = ( inEnableIndicator and inShowPspBarColor )
 barcolor(activePspBarColor ? Engine.getPspBarColor(inBullPspBarColor, inBearPspBarColor)        : na, offset = -1, editable = false, show_last = 3)
 barcolor(activePspBarColor ? Engine.getCurrentBarPspColor(inBullPspBarColor, inBearPspBarColor) : na,              editable = false, show_last = 1)
+
+
+//====================================================================
+// 3. DIAGNOSTIC LOGS (ONCE PER LAST BAR)
+//====================================================================
+
+if ( inEnableIndicator and barstate.islast )
+    var int lastLoggedBar = -1
+    if ( lastLoggedBar != bar_index )
+        lastLoggedBar := bar_index
+
+        array<string> monTfKeys = Engine.Settings.MonitoredTimeFramesMap.keys()
+        array<string> smtTfKeys = Engine.Settings.SmtMonitoredTimeFrames.keys()
+
+        log.info("========== [TIMEFRAME MAPS] ==========")
+        log.info("MonitoredTFs ({0}): [{1}]", str.tostring(monTfKeys.size()), monTfKeys.join(" -> "))
+        log.info("SmtMonitoredTFs ({0}): [{1}]", str.tostring(smtTfKeys.size()), smtTfKeys.join(" -> "))
+
+        array<SmtLib.SmtDisplayItem> topBull = Engine.getTopActiveSmts(SmtLib.SmtDirection.Bullish)
+        array<SmtLib.SmtDisplayItem> topBear = Engine.getTopActiveSmts(SmtLib.SmtDirection.Bearish)
+
+        log.info("========== [LAST {0} SELECTED BULLISH SMTs] ==========", str.tostring(Engine.Settings.MaxBullishSmts))
+        for [idx, item] in topBull
+            log.info("   #{0}: [{1}] TF={2}s Type={3} Conf={4} | StartBI={5} ({6}, PSP={7}) -> EndBI={8} ({9}, PSP={10})",
+                str.tostring(idx + 1),
+                na(item.LabelText) ? "SQ (no label)" : item.LabelText,
+                str.tostring(item.TimeFrameInSeconds),
+                str.tostring(item.IntType),
+                str.tostring(item.IsConfirmed),
+                str.tostring(item.StartBarIndex),
+                str.tostring(item.MainStartPrice),
+                str.tostring(item.StartIsPSP),
+                str.tostring(item.EndBarIndex),
+                str.tostring(item.MainEndPrice),
+                str.tostring(item.EndIsPSP)
+            )
+
+        log.info("========== [LAST {0} SELECTED BEARISH SMTs] ==========", str.tostring(Engine.Settings.MaxBearishSmts))
+        for [idx, item] in topBear
+            log.info("   #{0}: [{1}] TF={2}s Type={3} Conf={4} | StartBI={5} ({6}, PSP={7}) -> EndBI={8} ({9}, PSP={10})",
+                str.tostring(idx + 1),
+                na(item.LabelText) ? "SQ (no label)" : item.LabelText,
+                str.tostring(item.TimeFrameInSeconds),
+                str.tostring(item.IntType),
+                str.tostring(item.IsConfirmed),
+                str.tostring(item.StartBarIndex),
+                str.tostring(item.MainStartPrice),
+                str.tostring(item.StartIsPSP),
+                str.tostring(item.EndBarIndex),
+                str.tostring(item.MainEndPrice),
+                str.tostring(item.EndIsPSP)
+            )
