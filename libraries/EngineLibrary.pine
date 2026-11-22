@@ -1503,7 +1503,7 @@ export method getTopActiveSmts(Engine this, SmtLib.SmtDirection direction) =>
             if ( takeStart )
                 dedupedByStart.put(startKey, item)
 
-        // Stage 2b: Endpoint filtering + strict `AND` nested tip reversal (`( itemSpan < htfBarSpan ) and ( ( itemSpan * 4 ) <= winnerSpan )`)
+        // Stage 2b: Endpoint filtering — max 1 SMT per `EndBarIndex` across all timeframes (eliminates right-wick V-wedges)
         array<SmtLib.SmtDisplayItem> startPool = dedupedByStart.values()
         map<int, SmtLib.SmtDisplayItem> dedupedByEndpoint = map.new<int, SmtLib.SmtDisplayItem>()
         for item in startPool
@@ -1528,55 +1528,19 @@ export method getTopActiveSmts(Engine this, SmtLib.SmtDirection direction) =>
             if ( takeItem )
                 dedupedByEndpoint.put(endpointKey, item)
 
-        map<int, SmtLib.SmtDisplayItem> subCandleByEndpoint = map.new<int, SmtLib.SmtDisplayItem>()
-        for item in startPool
-            int endpointKey = item.EndBarIndex
-            SmtLib.SmtDisplayItem winner = dedupedByEndpoint.get(endpointKey)
-
-            if ( not( na(winner) ) and ( item.TimeFrameInSeconds < winner.TimeFrameInSeconds ) )
-                int itemSpan   = ( item.EndBarIndex - item.StartBarIndex )
-                int winnerSpan = ( winner.EndBarIndex - winner.StartBarIndex )
-                int htfBarSpan = int(winner.TimeFrameInSeconds / CURRENT_TIMEFRAME_IN_SECONDS)
-                if ( ( item.StartBarIndex > winner.StartBarIndex ) and ( itemSpan < htfBarSpan ) and ( ( itemSpan * 4 ) <= winnerSpan ) )
-                    SmtLib.SmtDisplayItem prevSub = subCandleByEndpoint.get(endpointKey)
-                    bool takeSub = na(prevSub)
-                    if ( not( takeSub ) )
-                        if ( item.TimeFrameInSeconds != prevSub.TimeFrameInSeconds )
-                            takeSub := ( item.TimeFrameInSeconds > prevSub.TimeFrameInSeconds )
-                        else if ( item.IsConfirmed != prevSub.IsConfirmed )
-                            takeSub := item.IsConfirmed
-                        else if ( item.IntType != prevSub.IntType )
-                            takeSub := ( item.IntType < prevSub.IntType )
-                        else if ( item.StartBarIndex != prevSub.StartBarIndex )
-                            takeSub := ( item.StartBarIndex < prevSub.StartBarIndex )
-                        else
-                            bool itemIsTriad = ( item.HasSecondAsset and item.HasThirdAsset )
-                            bool prevIsTriad = ( prevSub.HasSecondAsset and prevSub.HasThirdAsset )
-                            takeSub := ( itemIsTriad and not( prevIsTriad ) )
-
-                    if ( takeSub )
-                        subCandleByEndpoint.put(endpointKey, item)
-
         array<SmtLib.SmtDisplayItem> anchorPool = dedupedByEndpoint.values()
-        for [_, subItem] in subCandleByEndpoint
-            anchorPool.push(subItem)
 
-        // Stage 2c: Span enclosure — drop an inner SMT when a same-or-higher-TF outer SMT (confirmed or unconfirmed) wraps `[StartBarIndex .. EndBarIndex]`, except qualified nested tip reversals
+        // Stage 2c: Span enclosure — drop an inner SMT when a same-or-higher-TF outer SMT (confirmed or unconfirmed) wraps `[StartBarIndex .. EndBarIndex]`
         array<SmtLib.SmtDisplayItem> candidates = array.new<SmtLib.SmtDisplayItem>()
         for item in anchorPool
             bool engulfedByOuter = false
-            int  itemSpan        = ( item.EndBarIndex - item.StartBarIndex )
             for outer in anchorPool
                 if ( ( outer.DisplayKey != item.DisplayKey ) and ( outer.TimeFrameInSeconds >= item.TimeFrameInSeconds ) )
-                    bool coversSpan  = ( ( outer.StartBarIndex <= item.StartBarIndex ) and ( outer.EndBarIndex >= item.EndBarIndex ) )
-                    bool isWider     = ( ( outer.StartBarIndex < item.StartBarIndex )  or  ( outer.EndBarIndex > item.EndBarIndex ) )
+                    bool coversSpan = ( ( outer.StartBarIndex <= item.StartBarIndex ) and ( outer.EndBarIndex >= item.EndBarIndex ) )
+                    bool isWider    = ( ( outer.StartBarIndex < item.StartBarIndex )  or  ( outer.EndBarIndex > item.EndBarIndex ) )
                     if ( coversSpan and isWider )
-                        int  outerSpan    = ( outer.EndBarIndex - outer.StartBarIndex )
-                        int  outerBarSpan = int(outer.TimeFrameInSeconds / CURRENT_TIMEFRAME_IN_SECONDS)
-                        bool isNestedTip  = ( ( outer.TimeFrameInSeconds > item.TimeFrameInSeconds ) and ( item.EndBarIndex == outer.EndBarIndex ) and ( itemSpan < outerBarSpan ) and ( ( itemSpan * 4 ) <= outerSpan ) )
-                        if ( not( isNestedTip ) )
-                            engulfedByOuter := true
-                            break
+                        engulfedByOuter := true
+                        break
             if ( not( engulfedByOuter ) )
                 candidates.push(item)
 
